@@ -794,6 +794,46 @@ class ComicContinuityToolsTests(unittest.TestCase):
         self.assertEqual([], list(evidence.glob(".manifest-staging-*")))
         self.assertEqual([], list(evidence.glob(".manifest-backup-*")))
 
+    def test_force_manifest_cleans_staging_when_backup_directory_creation_fails(self):
+        self.add_page("189.jpg")
+        evidence = self.root / "证据"
+        build_manifests(self.root, evidence, expected_count=1)
+        before = {name: (evidence / name).read_bytes() for name in EVIDENCE_FILES}
+        real_mkdtemp = tempfile.mkdtemp
+
+        def fail_backup_creation(*args, **kwargs):
+            if kwargs.get("prefix") == ".manifest-backup-":
+                raise OSError("injected backup directory failure")
+            return real_mkdtemp(*args, **kwargs)
+
+        with mock.patch.object(
+            manifest_module.tempfile, "mkdtemp", side_effect=fail_backup_creation
+        ):
+            with self.assertRaisesRegex(OSError, "backup directory failure"):
+                build_manifests(self.root, evidence, expected_count=1, force=True)
+
+        self.assertEqual(before, {name: (evidence / name).read_bytes() for name in EVIDENCE_FILES})
+        self.assertEqual([], list(evidence.glob(".manifest-staging-*")))
+        self.assertEqual([], list(evidence.glob(".manifest-backup-*")))
+
+    def test_force_manifest_successfully_replaces_all_v4_pending_evidence(self):
+        self.add_page("nested/189.webp")
+        evidence = self.root / "证据"
+        build_manifests(self.root, evidence, expected_count=1)
+
+        build_manifests(self.root, evidence, expected_count=1, force=True)
+
+        self.assertEqual(set(EVIDENCE_FILES), {path.name for path in evidence.iterdir()})
+        self.assertEqual(b"", (evidence / "review_events.jsonl").read_bytes())
+        self.assertIn("status: pending", (evidence / "FINAL_QA_REPORT.md").read_text(encoding="utf-8"))
+        for filename in EVIDENCE_FILES[5:]:
+            if not filename.endswith(".json"):
+                continue
+            document = json.loads((evidence / filename).read_text(encoding="utf-8"))
+            registry_hash = document.pop("registry_hash")
+            self.assertEqual(canonical_hash(document), registry_hash, filename)
+            self.assertEqual("pending", document.get("status"), filename)
+
     def test_force_manifest_preserves_full_backup_when_rollback_is_incomplete(self):
         self.add_page("189.jpg")
         evidence = self.root / "证据"

@@ -25,8 +25,15 @@ from build_output_manifest import (
     VISUAL_REVIEW_CHECKS,
     _build_batches,
 )
-from pipeline_contracts import PAGE_CLASSES, canonical_hash, make_output_names, normalize_page_id
+from pipeline_contracts import (
+    PAGE_CLASSES,
+    canonical_hash,
+    make_output_names,
+    normalize_page_id,
+    normalize_relative_image_path,
+)
 from project_common import (
+    INPUT_PAGE_EXTENSIONS,
     REFERENCE_IMAGE_EXTENSIONS,
     atomic_write_json,
     discover_project,
@@ -129,6 +136,14 @@ def _snapshot_directory(root: Path, directory: Path) -> list[dict[str, str]]:
         root,
         sorted((path for path in directory.rglob("*") if path.is_file()), key=lambda p: p.as_posix().casefold()),
         "output_snapshot",
+    )
+
+
+def _supported_output_count(records: Iterable[Mapping[str, str]]) -> int:
+    return sum(
+        1
+        for record in records
+        if Path(record["path"]).suffix.casefold() in INPUT_PAGE_EXTENSIONS
     )
 
 
@@ -250,8 +265,11 @@ def _capture_source_snapshot(
     """Re-discover and hash every migration source without reusing prior hashes."""
     pages = sorted_input_pages(project.input_dir)
     if not pages:
-        raise ValueError("input must contain at least one JPG page")
-    page_ids = [_validate_page_range(page) for page in pages]
+        raise ValueError("input must contain at least one supported image page")
+    input_names = [page.relative_to(project.input_dir).as_posix() for page in pages]
+    for page in pages:
+        _validate_page_range(page)
+    page_ids = [_migration_page_id(input_name) for input_name in input_names]
     if len(page_ids) != len(set(page_ids)):
         raise ValueError("duplicate page identity")
     inventory_reference_images(project.references)
@@ -320,6 +338,14 @@ def _validate_page_range(page: Path) -> str:
     if not 1 <= base <= 9999 or (variant is not None and not 1 <= variant <= 9999):
         raise ValueError(f"input page number must be within 1..9999: {page.name}")
     return normalize_page_id(page.name)
+
+
+def _migration_page_id(relative_path: object) -> str:
+    """Bind a task/page identity to the exact relative source path."""
+    normalized = normalize_relative_image_path(relative_path)
+    if "/" not in normalized:
+        return normalize_page_id(normalized)
+    return "P" + canonical_hash({"relative_page": normalized})
 
 
 def _rows(document: object) -> list[Mapping[str, Any]]:
@@ -734,7 +760,7 @@ def _derive_migration_gate(
             )
             state = _alignment_state(alignment)
             try:
-                source_page_id = normalize_page_id(input_name)
+                source_page_id = _migration_page_id(input_name)
             except ValueError:
                 source_page_id = Path(input_name).stem
             page_alignment[output_name] = (state, source_page_id)
@@ -776,7 +802,8 @@ def _derive_migration_gate(
             }
         )
     input_page_ids = {
-        normalize_page_id(page.name) for page in sorted_input_pages(project.input_dir)
+        _migration_page_id(page.relative_to(project.input_dir).as_posix())
+        for page in sorted_input_pages(project.input_dir)
     }
     for candidate in _rejected_candidates(evidence_dir):
         if _candidate_page_id(candidate, input_page_ids) is None:
@@ -936,9 +963,7 @@ def migrate_project(
     source_hashes_before = _source_digest_map(source_records)
     source_lock_hash = canonical_hash(source_hashes_before)
     output_before = _snapshot_directory(project.root, project.output_dir)
-    output_count_before = sum(
-        1 for record in output_before if Path(record["path"]).suffix.casefold() == ".jpg"
-    )
+    output_count_before = _supported_output_count(output_before)
 
     alignment_rows = _rows(documents.get("novel_alignment.json"))
     repair_rows = _rows(documents.get("repair_log.json"))
@@ -1080,7 +1105,7 @@ def migrate_project(
             continue
         task = add_task(
             queue,
-            page_id=page["output_name"],
+            page_id=_migration_page_id(page["output_name"]),
             task_type=plan["task_type"],
             payload_hash=plan["payload_hash"],
             cluster_id=cluster["cluster_id"],
@@ -1100,7 +1125,7 @@ def migrate_project(
             continue
         task = add_task(
             queue,
-            page_id=output_name,
+            page_id=_migration_page_id(output_name),
             task_type=plan["task_type"],
             payload_hash=plan["payload_hash"],
             cluster_id=cluster["cluster_id"],
@@ -1158,7 +1183,7 @@ def migrate_project(
         pack = pack_by_id[cluster["reference_pack_id"]]
         record_failure(
             failure_store,
-            page_id=output_name,
+            page_id=_migration_page_id(output_name),
             cluster_id=cluster["cluster_id"],
             character="unknown",
             codes=["style_drift"],
@@ -1241,9 +1266,7 @@ def migrate_project(
     source_hashes_after = _source_digest_map(source_records_after)
     output_after = _snapshot_directory(project.root, project.output_dir)
     image_after = _snapshot_images(project.root, resolved_artifact_dir)
-    output_count_after = sum(
-        1 for record in output_after if Path(record["path"]).suffix.casefold() == ".jpg"
-    )
+    output_count_after = _supported_output_count(output_after)
 
     report_body = {
         "schema_version": SCHEMA_VERSION,
@@ -1509,7 +1532,7 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
             or document.get("pipeline_mode") != PIPELINE_MODE
             or document.get("evidence_files") != list(EVIDENCE_FILES)
         ):
-            errors.append(f"{label} v3 schema declaration invalid")
+            errors.append(f"{label} schema declaration invalid")
     if errors:
         return errors
     run_pages = manifest.get("pages")
@@ -1522,10 +1545,15 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
         return errors + ["bundle collections must be lists"]
     outputs = [row.get("output_name") for row in run_pages if isinstance(row, Mapping)]
     inputs = [row.get("input_name") for row in run_pages if isinstance(row, Mapping)]
+    try:
+        expected_outputs = make_output_names(inputs)
+    except ValueError:
+        expected_outputs = None
     if (
         len(outputs) != len(run_pages)
         or len(set(outputs)) != len(outputs)
-        or outputs != make_output_names(inputs)
+        or expected_outputs is None
+        or outputs != expected_outputs
         or len(set(inputs)) != len(inputs)
     ):
         errors.append("manifest input/output bijection invalid")
@@ -1629,7 +1657,11 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
         if page_id in task_by_page:
             errors.append("duplicate task page binding")
         task_by_page[page_id] = task
-    if set(task_by_page) != {normalize_page_id(name) for name in outputs}:
+    try:
+        expected_task_pages = {_migration_page_id(name) for name in outputs}
+    except ValueError:
+        expected_task_pages = set()
+    if set(task_by_page) != expected_task_pages:
         errors.append("task queue page bijection invalid")
     repair_by_output = {
         row.get("output_name"): row for row in repair_pages if isinstance(row, Mapping)
@@ -1645,7 +1677,11 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
         cluster_id = page_to_cluster.get(output)
         cluster = cluster_map.get(cluster_id)
         pack_id = cluster.get("reference_pack_id") if cluster is not None else None
-        task = task_by_page.get(normalize_page_id(output))
+        try:
+            task_page_id = _migration_page_id(output)
+        except ValueError:
+            task_page_id = None
+        task = task_by_page.get(task_page_id)
         for field in ("cluster_id", "reference_pack_id", "task_id"):
             if run_row.get(field) != repair_row.get(field):
                 errors.append(f"manifest repair trace mismatch: {output} {field}")

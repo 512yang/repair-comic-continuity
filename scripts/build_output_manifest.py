@@ -250,10 +250,11 @@ def _stage_evidence_set(
 
 
 def _commit_evidence_set(evidence: Path, staging: Path) -> None:
-    backup = Path(tempfile.mkdtemp(prefix=".manifest-backup-", dir=evidence))
-    originals = {name: (evidence / name).is_file() for name in EVIDENCE_FILES}
+    backup: Path | None = None
     preserve_recovery_dirs = False
     try:
+        backup = Path(tempfile.mkdtemp(prefix=".manifest-backup-", dir=evidence))
+        originals = {name: (evidence / name).is_file() for name in EVIDENCE_FILES}
         for name, existed in originals.items():
             if existed:
                 _copy_with_fsync(evidence / name, backup / name)
@@ -287,7 +288,8 @@ def _commit_evidence_set(evidence: Path, staging: Path) -> None:
     finally:
         if not preserve_recovery_dirs:
             shutil.rmtree(staging, ignore_errors=True)
-            shutil.rmtree(backup, ignore_errors=True)
+            if backup is not None:
+                shutil.rmtree(backup, ignore_errors=True)
 
 
 def build_manifests(

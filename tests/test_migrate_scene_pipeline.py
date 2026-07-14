@@ -180,6 +180,67 @@ def _make_project(
 
 
 class MigrationDryRunTests(unittest.TestCase):
+    def test_output_audit_counts_supported_extensions_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project")
+            _make_image(root / "输出" / "a" / "1.jpeg", (1, 2, 3))
+            _make_image(root / "输出" / "b" / "2.png", (4, 5, 6))
+            _make_image(root / "输出" / "b" / "3.webp", (7, 8, 9))
+
+            report = migrate_project(root, now=FIXED_NOW)["report"]
+
+            self.assertEqual(3, report["output_count_before"])
+            self.assertEqual(3, report["output_count_after"])
+            self.assertEqual(
+                {"输出/a/1.jpeg", "输出/b/2.png", "输出/b/3.webp"},
+                {record["path"] for record in report["output_snapshot_before"]},
+            )
+
+    def test_recursive_same_basename_pages_keep_unique_relative_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project", count=2, single_scene=True)
+            (root / "输入" / "a").mkdir()
+            (root / "输入" / "b").mkdir()
+            (root / "输入" / "1.jpg").replace(root / "输入" / "a" / "1.jpg")
+            (root / "输入" / "2.jpg").unlink()
+            _make_image(root / "输入" / "b" / "1.jpg", (2, 80, 120))
+
+            result = migrate_project(root, now=FIXED_NOW)
+            manifest = result["artifacts"]["comic_run_manifest.json"]
+            tasks = result["artifacts"]["task_queue.json"]["tasks"]
+
+            self.assertEqual(
+                ["a/1.jpg", "b/1.jpg"],
+                [page["output_name"] for page in manifest["pages"]],
+            )
+            self.assertEqual(2, len({task["page_id"] for task in tasks}))
+            self.assertEqual([], _validate_bundle_documents(result["artifacts"]))
+
+    def test_bundle_validation_reports_unsafe_relative_paths_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project")
+            artifacts = migrate_project(root, now=FIXED_NOW)["artifacts"]
+            artifacts["comic_run_manifest.json"]["pages"][0]["input_name"] = "../escape.jpg"
+            artifacts["comic_run_manifest.json"]["pages"][0]["output_name"] = "../escape.jpg"
+
+            errors = _validate_bundle_documents(artifacts)
+
+            self.assertTrue(
+                any("manifest input/output bijection invalid" in error for error in errors),
+                errors,
+            )
+
+    def test_bundle_schema_error_uses_current_neutral_wording(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project")
+            artifacts = migrate_project(root, now=FIXED_NOW)["artifacts"]
+            artifacts["comic_run_manifest.json"]["schema_version"] = "wrong"
+
+            errors = _validate_bundle_documents(artifacts)
+
+            self.assertTrue(any("schema declaration invalid" in error for error in errors))
+            self.assertFalse(any("v3 schema" in error for error in errors), errors)
+
     def test_dry_run_builds_one_queued_task_per_page_without_standard_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_project(
