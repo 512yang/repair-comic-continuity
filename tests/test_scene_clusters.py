@@ -40,6 +40,7 @@ def visual_cluster(**overrides):
         "cast": ["邓正虎", "天朗真人"],
         "has_visual_tasks": True,
         "visual_targets": ["场景/0189.png"],
+        "canary_page": "场景/0189.png",
         "repair_characters": ["邓正虎", "天朗真人"],
         "issue_schedule": ["character_identity"],
     }
@@ -301,6 +302,162 @@ class SceneClusterTests(unittest.TestCase):
 
 
 class ReferencePackTests(unittest.TestCase):
+    def test_generated_candidate_is_forbidden_for_identity_prop_and_scene_roles(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        identity_refs = complete_references()
+        identity_refs[2] = {
+            **identity_refs[2],
+            "source": "generated_candidate",
+        }
+        cases = [
+            (visual_cluster(), identity_refs, "identity_only source"),
+            (
+                visual_cluster(
+                    issue_schedule=[{"type": "prop continuity", "subject": "狼毫笔"}],
+                    persistent_props=["狼毫笔"],
+                ),
+                complete_references()
+                + [
+                    {
+                        "path": "输入/稳定页/狼毫笔.png",
+                        "role": "prop_anchor",
+                        "subject": "狼毫笔",
+                        "source": "generated_candidate",
+                        "review": reviewed("prop-review"),
+                        "sha256": "f" * 64,
+                    }
+                ],
+                "prop_anchor source",
+            ),
+            (
+                visual_cluster(
+                    issue_schedule=[{"type": "scene consistency", "subject": "飞龙泉"}],
+                    scene_key=["chapter-ten", "飞龙泉", "夜", "泉中"],
+                ),
+                complete_references()
+                + [
+                    {
+                        "path": "输入/稳定页/飞龙泉.png",
+                        "role": "scene_anchor",
+                        "subject": "飞龙泉",
+                        "source": "generated_candidate",
+                        "review": reviewed("scene-review"),
+                        "sha256": "f" * 64,
+                    }
+                ],
+                "scene_anchor source",
+            ),
+        ]
+        for cluster, references, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    scene_clusters.build_reference_pack(
+                        cluster, references, stable_pages=stable_pages
+                    )
+
+    def test_required_prop_and_scene_subjects_need_exact_complete_anchor_coverage(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        prop_anchor = {
+            "path": "输入/稳定页/狼毫笔.png",
+            "role": "prop_anchor",
+            "subject": "狼毫笔",
+            "source": "reviewed_prop_appearance",
+            "review": reviewed("prop-review"),
+            "sha256": "f" * 64,
+        }
+        scene_anchor = {
+            "path": "输入/稳定页/飞龙泉.png",
+            "role": "scene_anchor",
+            "subject": "飞龙泉",
+            "source": "reviewed_scene_appearance",
+            "review": reviewed("scene-review"),
+            "sha256": "f" * 64,
+        }
+        cases = (
+            (
+                visual_cluster(
+                    issue_schedule=[
+                        {"type": "prop continuity", "subject": "狼毫笔"},
+                        {"type": "prop continuity", "subject": "墨锭"},
+                    ],
+                    persistent_props=["狼毫笔", "墨锭"],
+                ),
+                prop_anchor,
+                "prop_anchor.*complete",
+            ),
+            (
+                visual_cluster(
+                    issue_schedule=[
+                        {"type": "scene consistency", "subject": "飞龙泉"},
+                        {"type": "scene consistency", "subject": "一道宗大殿"},
+                    ]
+                ),
+                scene_anchor,
+                "scene_anchor.*complete",
+            ),
+        )
+        for cluster, anchor, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    scene_clusters.build_reference_pack(
+                        cluster,
+                        complete_references() + [anchor],
+                        stable_pages=stable_pages,
+                    )
+
+    def test_explicit_issue_subjects_override_broader_persistent_prop_fallback(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        prop_anchor = {
+            "path": "输入/稳定页/狼毫笔.png",
+            "role": "prop_anchor",
+            "subject": "狼毫笔",
+            "source": "reviewed_prop_appearance",
+            "review": reviewed("prop-review"),
+            "sha256": "f" * 64,
+        }
+        pack = scene_clusters.build_reference_pack(
+            visual_cluster(
+                issue_schedule=[{"type": "prop continuity", "subject": "狼毫笔"}],
+                persistent_props=["狼毫笔", "墨锭"],
+            ),
+            complete_references() + [prop_anchor],
+            stable_pages=stable_pages,
+        )
+        self.assertEqual(pack["cluster_id"], "cluster-a")
+
+    def test_visual_cluster_requires_nonempty_canary_member(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "canary_page"):
+            scene_clusters.build_reference_pack(
+                visual_cluster(canary_page=None),
+                complete_references(),
+                stable_pages=stable_pages,
+            )
+
     def test_false_visual_cluster_cannot_retain_visual_evidence_or_schedule(self):
         stable_pages = [
             {
@@ -323,6 +480,7 @@ class ReferencePackTests(unittest.TestCase):
             cluster.update(
                 has_visual_tasks=False,
                 visual_targets=[],
+                canary_page=None,
                 issue_schedule=[],
             )
             cluster.update(mutation)
@@ -360,6 +518,7 @@ class ReferencePackTests(unittest.TestCase):
             "role": "identity_only",
             "subject": "无关人物",
             "source": "character_sheet",
+            "review": reviewed("unrelated-identity"),
             "sha256": "9" * 64,
         }
         for extra, message in (

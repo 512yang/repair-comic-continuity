@@ -39,6 +39,22 @@ LEGACY_REFERENCE_ROLES = frozenset(
     }
 )
 
+_V4_SOURCE_ALLOWLIST = {
+    "target_composition": frozenset({"immutable_input"}),
+    "comic_style_anchor": frozenset(
+        {"reviewed_comic_page", "reviewed_comic_identity_anchor"}
+    ),
+    "identity_only": frozenset(
+        {"character_sheet", "approved_identity_reference"}
+    ),
+    "prop_anchor": frozenset(
+        {"reviewed_prop_appearance", "reviewed_prop_page", "reviewed_comic_page"}
+    ),
+    "scene_anchor": frozenset(
+        {"reviewed_scene_appearance", "reviewed_scene_page", "reviewed_comic_page"}
+    ),
+}
+
 
 class SceneClusterContractError(ValueError):
     """A machine-routable scene-cluster or reference-pack rejection."""
@@ -729,18 +745,15 @@ def _canonical_reference(
         "source": source,
         "sha256": _sha256(reference.get("sha256"), "reference"),
     }
-    if role == "target_composition" and source != "immutable_input":
-        raise ValueError("target_composition source must be immutable_input")
+    if source not in _V4_SOURCE_ALLOWLIST[role]:
+        allowed = ", ".join(sorted(_V4_SOURCE_ALLOWLIST[role]))
+        raise ValueError(f"{role} source must be one of: {allowed}")
     if role == "comic_style_anchor":
-        if source not in {"reviewed_comic_page", "reviewed_comic_identity_anchor"}:
-            raise ValueError(
-                "comic_style_anchor source is not an allowed reviewed comic page"
-            )
         if _looks_contaminated(_identity(path)):
             raise ValueError("comic_style_anchor must not use a character sheet")
     review = _review_record(
         reference.get("review"),
-        required=role in {"comic_style_anchor", "prop_anchor", "scene_anchor"},
+        required=role != "target_composition",
         label=role,
     )
     if review is not None:
@@ -784,6 +797,8 @@ def _validate_cluster_visual_contract(cluster: Mapping[str, Any]) -> None:
     if has_visual_tasks:
         if not targets:
             raise ValueError("has_visual_tasks=true requires visual_targets")
+        if canary is None:
+            raise ValueError("has_visual_tasks=true requires canary_page")
         return
 
 
@@ -902,14 +917,8 @@ def _validate_visual_coverage(
         raise ValueError("scene_anchor required by issue schedule")
 
     issue_records = _issue_records(cluster.get("issue_schedule"))
-    prop_subjects = {
-        _identity(value)
-        for value in _string_list(cluster.get("persistent_props"), "persistent_props")
-    }
+    prop_subjects: set[str] = set()
     scene_subjects: set[str] = set()
-    key = cluster.get("scene_key")
-    if isinstance(key, (list, tuple)) and len(key) >= 2 and key[1] != "unknown":
-        scene_subjects.add(_identity(str(key[1])))
     for issue in issue_records:
         if not isinstance(issue, Mapping) or not isinstance(issue.get("subject"), str):
             continue
@@ -918,14 +927,31 @@ def _validate_visual_coverage(
             prop_subjects.add(_identity(issue["subject"]))
         if any(term in text for term in ("scene", "location", "场景", "地点")):
             scene_subjects.add(_identity(issue["subject"]))
-    if prop_subjects and any(
-        _identity(str(row["subject"])) not in prop_subjects for row in prop_rows
-    ):
-        raise ValueError("prop_anchor subject does not match declared prop subjects")
-    if scene_subjects and any(
-        _identity(str(row["subject"])) not in scene_subjects for row in scene_rows
-    ):
-        raise ValueError("scene_anchor subject does not match declared scene subjects")
+    if prop_required and not prop_subjects:
+        prop_subjects.update(
+            _identity(value)
+            for value in _string_list(
+                cluster.get("persistent_props"), "persistent_props"
+            )
+        )
+    if scene_required and not scene_subjects:
+        key = cluster.get("scene_key")
+        if isinstance(key, (list, tuple)) and len(key) >= 2 and key[1] != "unknown":
+            scene_subjects.add(_identity(str(key[1])))
+    prop_row_subjects = {
+        _identity(str(row["subject"])) for row in prop_rows
+    }
+    scene_row_subjects = {
+        _identity(str(row["subject"])) for row in scene_rows
+    }
+    if prop_subjects and prop_row_subjects != prop_subjects:
+        raise ValueError(
+            "prop_anchor subjects must provide exact complete declared prop coverage"
+        )
+    if scene_subjects and scene_row_subjects != scene_subjects:
+        raise ValueError(
+            "scene_anchor subjects must provide exact complete declared scene coverage"
+        )
 
 
 def validate_reference_pack(
