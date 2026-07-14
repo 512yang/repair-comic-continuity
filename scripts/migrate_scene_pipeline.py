@@ -801,12 +801,22 @@ def _derive_migration_gate(
                 "detail": "only confirmed alignment pages may pass migration",
             }
         )
-    input_page_ids = {
-        _migration_page_id(page.relative_to(project.input_dir).as_posix())
+    input_relative_names = [
+        page.relative_to(project.input_dir).as_posix()
         for page in sorted_input_pages(project.input_dir)
+    ]
+    relative_source_ids = {
+        _relative_source_stem(name): _migration_page_id(name)
+        for name in input_relative_names
     }
+    input_page_ids = set(relative_source_ids.values())
     for candidate in _rejected_candidates(evidence_dir):
-        if _candidate_page_id(candidate, input_page_ids) is None:
+        if _candidate_page_id(
+            candidate,
+            input_page_ids,
+            evidence_dir=evidence_dir,
+            relative_source_ids=relative_source_ids,
+        ) is None:
             blockers.append(
                 {
                     "code": "REJECTED_EVIDENCE_UNBOUND",
@@ -851,12 +861,50 @@ def _derive_migration_gate(
     }
 
 
-def _candidate_page_id(candidate: Path, page_ids: set[str]) -> str | None:
+def _relative_source_stem(relative_path: object) -> str:
+    normalized = normalize_relative_image_path(relative_path)
+    return unicodedata.normalize("NFKC", str(Path(normalized).with_suffix(""))).replace(
+        "\\", "/"
+    ).casefold()
+
+
+def _candidate_page_id(
+    candidate: Path,
+    page_ids: set[str],
+    *,
+    evidence_dir: Path | None = None,
+    relative_source_ids: Mapping[str, str] | None = None,
+) -> str | None:
+    if evidence_dir is not None and relative_source_ids:
+        legacy_root = evidence_dir / "page_candidates"
+        try:
+            relative_candidate = candidate.relative_to(legacy_root)
+        except ValueError:
+            pass
+        else:
+            source_stem = re.sub(
+                r"_(?:repaired|candidate|visual|rejected).*$",
+                "",
+                unicodedata.normalize("NFKC", relative_candidate.stem).strip(),
+                flags=re.IGNORECASE,
+            )
+            relative_key = unicodedata.normalize(
+                "NFKC", (relative_candidate.parent / source_stem).as_posix()
+            ).casefold()
+            explicit_page_id = relative_source_ids.get(relative_key)
+            if explicit_page_id is not None:
+                return explicit_page_id
+
     candidates = [candidate.stem]
     candidates.extend(parent.name for parent in candidate.parents)
     for raw in candidates:
         normalized = unicodedata.normalize("NFKC", raw).strip()
-        normalized = re.sub(r"_(?:repaired|candidate|visual).*$", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(
+            r"_(?:repaired|candidate|visual|rejected).*$",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
         variant = re.match(r"^(\d+)_(\d+)(?:_|$)", normalized)
         if variant:
             normalized = f"{variant.group(1)}({variant.group(2)})"
@@ -1164,11 +1212,20 @@ def migrate_project(
         }
     )
     page_id_set = set(page_ids)
+    relative_source_ids = {
+        _relative_source_stem(page["input_name"]): page["page_id"]
+        for page in page_infos
+    }
     source_to_output = {
         page["page_id"]: page["output_name"] for page in page_infos
     }
     for candidate in _rejected_candidates(evidence_dir):
-        source_page_id = _candidate_page_id(candidate, page_id_set)
+        source_page_id = _candidate_page_id(
+            candidate,
+            page_id_set,
+            evidence_dir=evidence_dir,
+            relative_source_ids=relative_source_ids,
+        )
         if source_page_id is None:
             blockers.append(
                 {
@@ -1545,18 +1602,25 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
         return errors + ["bundle collections must be lists"]
     outputs = [row.get("output_name") for row in run_pages if isinstance(row, Mapping)]
     inputs = [row.get("input_name") for row in run_pages if isinstance(row, Mapping)]
-    try:
-        expected_outputs = make_output_names(inputs)
-    except ValueError:
+    path_types_valid = all(isinstance(value, str) for value in inputs + outputs)
+    if path_types_valid:
+        try:
+            expected_outputs = make_output_names(inputs)
+        except ValueError:
+            expected_outputs = None
+    else:
         expected_outputs = None
     if (
         len(outputs) != len(run_pages)
-        or len(set(outputs)) != len(outputs)
+        or not path_types_valid
+        or (path_types_valid and len(set(outputs)) != len(outputs))
         or expected_outputs is None
         or outputs != expected_outputs
-        or len(set(inputs)) != len(inputs)
+        or (path_types_valid and len(set(inputs)) != len(inputs))
     ):
         errors.append("manifest input/output bijection invalid")
+    if not path_types_valid:
+        return errors
     cluster_map: dict[str, Mapping[str, Any]] = {}
     page_to_cluster: dict[str, str] = {}
     ordered_members: list[str] = []

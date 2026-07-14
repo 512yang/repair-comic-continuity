@@ -216,6 +216,68 @@ class MigrationDryRunTests(unittest.TestCase):
             self.assertEqual(2, len({task["page_id"] for task in tasks}))
             self.assertEqual([], _validate_bundle_documents(result["artifacts"]))
 
+    def test_nested_rejected_candidate_binds_explicit_relative_source_without_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project", count=2, single_scene=True)
+            (root / "输入" / "a").mkdir()
+            (root / "输入" / "b").mkdir()
+            (root / "输入" / "1.jpg").replace(root / "输入" / "a" / "1.jpg")
+            (root / "输入" / "2.jpg").unlink()
+            _make_image(root / "输入" / "b" / "1.jpg", (2, 80, 120))
+            _make_image(
+                root / "evidence" / "page_candidates" / "a" / "1_rejected.png",
+                (0, 0, 0),
+            )
+
+            result = migrate_project(root, now=FIXED_NOW)
+            artifacts = result["artifacts"]
+            first_page = artifacts["comic_run_manifest.json"]["pages"][0]
+            first_task = next(
+                task
+                for task in artifacts["task_queue.json"]["tasks"]
+                if task["task_id"] == first_page["task_id"]
+            )
+            failures = artifacts["failure_learning.json"]["failures"]
+
+            self.assertFalse(
+                any(
+                    blocker["code"] == "REJECTED_EVIDENCE_UNBOUND"
+                    for blocker in result["report"]["blockers"]
+                ),
+                result["report"]["blockers"],
+            )
+            self.assertEqual(1, len(failures))
+            self.assertEqual(first_task["page_id"], failures[0]["page_id"])
+            self.assertIn(
+                "page_candidates/a/1_rejected.png",
+                failures[0]["before_candidate"]["path"],
+            )
+
+    def test_flat_rejected_candidate_does_not_guess_between_nested_same_basenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project", count=2, single_scene=True)
+            (root / "输入" / "a").mkdir()
+            (root / "输入" / "b").mkdir()
+            (root / "输入" / "1.jpg").replace(root / "输入" / "a" / "1.jpg")
+            (root / "输入" / "2.jpg").unlink()
+            _make_image(root / "输入" / "b" / "1.jpg", (2, 80, 120))
+            _make_image(
+                root / "evidence" / "page_candidates" / "1_rejected.png",
+                (0, 0, 0),
+            )
+
+            result = migrate_project(root, now=FIXED_NOW)
+
+            self.assertEqual([], result["artifacts"]["failure_learning.json"]["failures"])
+            self.assertTrue(
+                any(
+                    blocker["code"] == "REJECTED_EVIDENCE_UNBOUND"
+                    and blocker["path"].endswith("page_candidates/1_rejected.png")
+                    for blocker in result["report"]["blockers"]
+                ),
+                result["report"]["blockers"],
+            )
+
     def test_bundle_validation_reports_unsafe_relative_paths_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_project(Path(tmp) / "project")
@@ -229,6 +291,20 @@ class MigrationDryRunTests(unittest.TestCase):
                 any("manifest input/output bijection invalid" in error for error in errors),
                 errors,
             )
+
+    def test_bundle_validation_reports_non_string_input_and_output_without_type_error(self) -> None:
+        for field in ("input_name", "output_name"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                root = _make_project(Path(tmp) / "project")
+                artifacts = migrate_project(root, now=FIXED_NOW)["artifacts"]
+                artifacts["comic_run_manifest.json"]["pages"][0][field] = ["not", "a", "path"]
+
+                errors = _validate_bundle_documents(artifacts)
+
+                self.assertTrue(
+                    any("manifest input/output bijection invalid" in error for error in errors),
+                    errors,
+                )
 
     def test_bundle_schema_error_uses_current_neutral_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
