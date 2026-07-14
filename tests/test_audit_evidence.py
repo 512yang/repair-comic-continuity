@@ -364,6 +364,29 @@ class DualAuditAndRoutingTests(unittest.TestCase):
             ["continuity", "source"],
         )
 
+    def test_any_blocked_audit_keeps_dual_aggregate_evidence_blocked(self):
+        blocked = valid_audit(
+            classification="evidence_blocked",
+            classification_evidence=["full-resolution anchor unavailable"],
+        )
+        unchanged = self.source_audit()
+        defect = self.source_audit(
+            findings=[
+                {"code": "TEXT_ERROR", "category": "text", "blocking": True}
+            ],
+            classification="defect",
+            classification_evidence=["source string differs"],
+        )
+        source_blocked = self.source_audit(
+            classification="evidence_blocked",
+            classification_evidence=["novel alignment unresolved"],
+        )
+
+        for source in (unchanged, defect, source_blocked):
+            with self.subTest(source_classification=source["classification"]):
+                result = aggregate_page_audits([blocked, source])
+                self.assertEqual(result["decision"], "evidence_blocked")
+
     def test_route_rejects_boolean_and_nonfinite_confidence_without_mutation(self):
         findings = [{"code": "TEXT_ERROR", "category": "text", "blocking": True}]
         original = copy.deepcopy(findings)

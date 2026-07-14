@@ -329,10 +329,17 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             record.get("perspective_disagreement", False) for record in records
         )
     )
-    decision = route_page_decision(
-        findings_for_route,
-        min(record["confidence"] for record in records),
-        perspective_disagreement=disagreement,
+    blocked_evidence = any(
+        record["classification"] == "evidence_blocked" for record in records
+    )
+    decision = (
+        "evidence_blocked"
+        if blocked_evidence
+        else route_page_decision(
+            findings_for_route,
+            min(record["confidence"] for record in records),
+            perspective_disagreement=disagreement,
+        )
     )
     result = {
         "page": continuity["page"],
@@ -357,6 +364,7 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         },
         "finding_evidence": finding_evidence,
         "perspective_disagreement": disagreement,
+        "blocked_evidence": blocked_evidence,
         "decision": decision,
     }
     result["aggregate_hash"] = canonical_hash(result)
