@@ -277,8 +277,10 @@ class EntityTimelineTests(unittest.TestCase):
                         "facial_hair": {
                             "regions": {"mustache": {"color": "black"}},
                             "mustache": "thin",
+                            "sideburn": "long",
                         },
                         "moustache": "thin",
+                        "sideburns": "long",
                     },
                 )
             ],
@@ -288,16 +290,30 @@ class EntityTimelineTests(unittest.TestCase):
             "facial_hair"
         ]
         self.assertEqual("thin", facial_hair["moustache"])
+        self.assertEqual("long", facial_hair["sideburn"])
+        self.assertNotIn("sideburns", facial_hair)
         self.assertEqual(
             {"moustache": {"color": "black"}}, facial_hair["regions"]
         )
 
-        for state in (
-            {"facial_hair": {"mustache": "thin"}, "moustache": "thick"},
-            {"facial_hair": {"mustache": "thin", "moustache": "thick"}},
+        for state, field in (
+            (
+                {"facial_hair": {"mustache": "thin"}, "moustache": "thick"},
+                "moustache",
+            ),
+            (
+                {"facial_hair": {"mustache": "thin", "moustache": "thick"}},
+                "moustache",
+            ),
+            (
+                {"facial_hair": {"sideburn": "long"}, "sideburns": "short"},
+                "sideburn",
+            ),
         ):
             with self.subTest(state=state):
-                with self.assertRaisesRegex(ValueError, "conflicting facial_hair.moustache"):
+                with self.assertRaisesRegex(
+                    ValueError, f"conflicting facial_hair.{field}"
+                ):
                     build_timeline([observation("character", "甲", "001.jpg", state)], [])
 
     def test_multi_field_change_requires_explicit_changed_fields(self):

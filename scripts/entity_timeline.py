@@ -76,7 +76,9 @@ _CRITICAL_FIELDS = {
 }
 
 _UNKNOWN_TEXT = frozenset({"unknown", "未知", "不明", "未确定", "不确定"})
-_FACIAL_HAIR_FIELDS = frozenset({"beard", "moustache", "mustache", "sideburn", "stubble"})
+_FACIAL_HAIR_FIELDS = frozenset(
+    {"beard", "moustache", "mustache", "sideburn", "sideburns", "stubble"}
+)
 _FACIAL_HAIR_KEY_ALIASES = {
     "beard": "beard",
     "moustache": "moustache",
