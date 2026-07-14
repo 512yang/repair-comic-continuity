@@ -301,6 +301,147 @@ class SceneClusterTests(unittest.TestCase):
 
 
 class ReferencePackTests(unittest.TestCase):
+    def test_false_visual_cluster_cannot_retain_visual_evidence_or_schedule(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        mutations = (
+            {"visual_targets": ["场景/0189.png"]},
+            {"canary_page": "场景/0189.png", "visual_targets": []},
+            {
+                "issue_schedule": [{"type": "prop continuity", "subject": "狼毫笔"}],
+                "visual_targets": [],
+            },
+            {"has_visual_task": True, "visual_targets": []},
+        )
+        for mutation in mutations:
+            cluster = visual_cluster()
+            cluster.update(
+                has_visual_tasks=False,
+                visual_targets=[],
+                issue_schedule=[],
+            )
+            cluster.update(mutation)
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, "has_visual_tasks=false|visual flag"):
+                    scene_clusters.build_reference_pack(
+                        cluster, complete_references(), stable_pages=stable_pages
+                    )
+
+    def test_extra_target_and_unstable_style_rows_are_rejected_individually(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        extra_target = {
+            "path": "输入/场景/9999.png",
+            "role": "target_composition",
+            "subject": "场景/9999.png",
+            "source": "immutable_input",
+            "sha256": "f" * 64,
+        }
+        extra_style = {
+            "path": "输入/稳定页/0999.png",
+            "role": "comic_style_anchor",
+            "subject": "comic_style",
+            "source": "reviewed_comic_page",
+            "review": reviewed("unstable-style"),
+            "sha256": "f" * 64,
+        }
+        extra_identity = {
+            "path": "人物参考图/无关人物.png",
+            "role": "identity_only",
+            "subject": "无关人物",
+            "source": "character_sheet",
+            "sha256": "9" * 64,
+        }
+        for extra, message in (
+            (extra_target, "target_composition.*exact"),
+            (extra_style, "comic_style_anchor.*stable"),
+            (extra_identity, "identity_only.*cast"),
+        ):
+            with self.subTest(role=extra["role"]):
+                with self.assertRaisesRegex(ValueError, message):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(),
+                        complete_references() + [extra],
+                        stable_pages=stable_pages,
+                    )
+
+    def test_unrequested_or_wrong_subject_prop_and_scene_anchors_are_rejected(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        prop_anchor = {
+            "path": "输入/稳定页/狼毫笔.png",
+            "role": "prop_anchor",
+            "subject": "错误道具",
+            "source": "reviewed_prop_page",
+            "review": reviewed("prop-review"),
+            "sha256": "f" * 64,
+        }
+        scene_anchor = {
+            "path": "输入/稳定页/飞龙泉.png",
+            "role": "scene_anchor",
+            "subject": "错误场景",
+            "source": "reviewed_scene_page",
+            "review": reviewed("scene-review"),
+            "sha256": "f" * 64,
+        }
+        for anchor in (prop_anchor, scene_anchor):
+            with self.subTest(role=anchor["role"]):
+                with self.assertRaisesRegex(ValueError, "unexpected"):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(issue_schedule=["character_identity"]),
+                        complete_references() + [anchor],
+                        stable_pages=stable_pages,
+                    )
+
+        with self.assertRaisesRegex(ValueError, "prop_anchor subject"):
+            scene_clusters.build_reference_pack(
+                visual_cluster(
+                    issue_schedule=[{"type": "prop continuity", "subject": "狼毫笔"}],
+                    persistent_props=["狼毫笔"],
+                ),
+                complete_references() + [prop_anchor],
+                stable_pages=stable_pages,
+            )
+
+    def test_public_v4_validation_requires_cluster_for_coverage(self):
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "V4.*cluster"):
+            scene_clusters.validate_reference_pack(
+                {"references": complete_references()},
+                stable_pages=stable_pages,
+            )
+
+    def test_non_string_roles_are_structurally_rejected_before_set_operations(self):
+        for role in ([], {}):
+            with self.subTest(role=role):
+                with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(),
+                        [{"path": "输入/场景/0189.png", "role": role}],
+                    )
+                self.assertEqual(raised.exception.code, "INVALID_REFERENCE_ROLE")
+
     def test_v4_missing_trace_fields_never_falls_back_to_legacy(self):
         reference = {
             "path": "人物参考图/邓正虎.png",

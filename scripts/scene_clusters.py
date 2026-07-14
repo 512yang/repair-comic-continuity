@@ -652,6 +652,14 @@ def _validate_contract_version(contract_version: str) -> None:
 def _reference_schema_preflight(
     references: list[Mapping[str, Any]], contract_version: str
 ) -> None:
+    for row in references:
+        role = row.get("role")
+        if not isinstance(role, str):
+            raise SceneClusterContractError(
+                "INVALID_REFERENCE_ROLE",
+                "reference role must be a string",
+                role_type=type(role).__name__,
+            )
     roles = {row.get("role") for row in references}
     v3_only = roles & (LEGACY_REFERENCE_ROLES - REFERENCE_ROLES)
     v4_only = roles & (REFERENCE_ROLES - LEGACY_REFERENCE_ROLES)
@@ -744,6 +752,41 @@ def _issue_texts(cluster: Mapping[str, Any]) -> list[str]:
     return [str(value).casefold() for value in _issue_records(cluster.get("issue_schedule"))]
 
 
+def _issues_imply_visual(cluster: Mapping[str, Any]) -> bool:
+    return any(
+        any(term in issue for term in _VISUAL_TERMS)
+        for issue in _issue_texts(cluster)
+    )
+
+
+def _validate_cluster_visual_contract(cluster: Mapping[str, Any]) -> None:
+    has_visual_tasks = cluster.get("has_visual_tasks")
+    if not isinstance(has_visual_tasks, bool):
+        raise ValueError("has_visual_tasks must be a boolean")
+    singular = cluster.get("has_visual_task")
+    if singular is not None:
+        if not isinstance(singular, bool):
+            raise ValueError("has_visual_task must be a boolean")
+        if singular != has_visual_tasks:
+            raise ValueError("singular/plural visual flag conflict")
+    targets = _string_list(cluster.get("visual_targets"), "visual_targets")
+    canary = cluster.get("canary_page")
+    if not has_visual_tasks and (
+        targets or canary is not None or _issues_imply_visual(cluster)
+    ):
+        raise ValueError(
+            "has_visual_tasks=false cannot retain visual targets, canary, or visual issue schedule"
+        )
+    if canary is not None:
+        canary_text = _required_text(canary, "canary_page")
+        if _identity(canary_text) not in {_identity(target) for target in targets}:
+            raise ValueError("canary_page must belong to visual_targets")
+    if has_visual_tasks:
+        if not targets:
+            raise ValueError("has_visual_tasks=true requires visual_targets")
+        return
+
+
 def _requires_issue_anchor(cluster: Mapping[str, Any], kind: str) -> bool:
     terms = {
         "prop": ("prop", "道具"),
@@ -757,10 +800,8 @@ def _validate_visual_coverage(
     references: list[Mapping[str, Any]],
     stable_pages: list[Mapping[str, object]],
 ) -> None:
-    has_visual_tasks = cluster.get("has_visual_tasks")
-    if not isinstance(has_visual_tasks, bool):
-        raise ValueError("has_visual_tasks must be a boolean")
-    if not has_visual_tasks:
+    _validate_cluster_visual_contract(cluster)
+    if not cluster["has_visual_tasks"]:
         return
     required_characters = _string_list(cluster.get("cast"), "cast")
     for character in _string_list(cluster.get("repair_characters"), "repair_characters"):
@@ -784,12 +825,33 @@ def _validate_visual_coverage(
     ]
     if missing_cast:
         raise ValueError(f"cast coverage missing: {missing_cast}")
+    allowed_identity_subjects = {_identity(value) for value in required_characters}
+    unexpected_identity = [
+        str(row["subject"])
+        for row in references
+        if row["role"] == "identity_only"
+        and _identity(str(row["subject"])) not in allowed_identity_subjects
+    ]
+    if unexpected_identity:
+        raise ValueError(
+            f"identity_only subject is outside cluster cast: {unexpected_identity}"
+        )
 
     targets = _string_list(
         cluster.get("visual_targets") or cluster.get("member_pages"),
         "visual_targets",
     )
     target_rows = [row for row in references if row["role"] == "target_composition"]
+    target_identities = {_identity(target) for target in targets}
+    target_row_subjects = [_identity(str(row["subject"])) for row in target_rows]
+    if (
+        len(target_rows) != len(targets)
+        or len(set(target_row_subjects)) != len(target_row_subjects)
+        or set(target_row_subjects) != target_identities
+    ):
+        raise ValueError(
+            "target_composition rows (target composition) must exactly match the visual target set"
+        )
     for target in targets:
         target_path = normalize_relative_image_path(target)
         matches = [
@@ -812,24 +874,58 @@ def _validate_visual_coverage(
     stable_by_path = {
         _identity(str(row["path"])): str(row["sha256"]) for row in stable_pages
     }
-    reviewed_style = [
-        row
-        for row in references
-        if row["role"] == "comic_style_anchor"
-        and "review" in row
-        and stable_by_path.get(_identity(str(row["path"]))) == row["sha256"]
+    style_rows = [
+        row for row in references if row["role"] == "comic_style_anchor"
     ]
-    if not reviewed_style:
+    if not style_rows:
         raise ValueError("visual pack requires a reviewed comic_style_anchor")
+    if any(
+        "review" not in row
+        or stable_by_path.get(_identity(str(row["path"]))) != row["sha256"]
+        for row in style_rows
+    ):
+        raise ValueError(
+            "every comic_style_anchor must match a reviewed stable page path and sha256"
+        )
 
-    if _requires_issue_anchor(cluster, "prop") and not any(
-        row["role"] == "prop_anchor" for row in references
-    ):
+    prop_required = _requires_issue_anchor(cluster, "prop")
+    scene_required = _requires_issue_anchor(cluster, "scene")
+    prop_rows = [row for row in references if row["role"] == "prop_anchor"]
+    scene_rows = [row for row in references if row["role"] == "scene_anchor"]
+    if prop_rows and not prop_required:
+        raise ValueError("unexpected prop_anchor without a scheduled prop issue")
+    if scene_rows and not scene_required:
+        raise ValueError("unexpected scene_anchor without a scheduled scene issue")
+    if prop_required and not prop_rows:
         raise ValueError("prop_anchor required by issue schedule")
-    if _requires_issue_anchor(cluster, "scene") and not any(
-        row["role"] == "scene_anchor" for row in references
-    ):
+    if scene_required and not scene_rows:
         raise ValueError("scene_anchor required by issue schedule")
+
+    issue_records = _issue_records(cluster.get("issue_schedule"))
+    prop_subjects = {
+        _identity(value)
+        for value in _string_list(cluster.get("persistent_props"), "persistent_props")
+    }
+    scene_subjects: set[str] = set()
+    key = cluster.get("scene_key")
+    if isinstance(key, (list, tuple)) and len(key) >= 2 and key[1] != "unknown":
+        scene_subjects.add(_identity(str(key[1])))
+    for issue in issue_records:
+        if not isinstance(issue, Mapping) or not isinstance(issue.get("subject"), str):
+            continue
+        text = str(issue).casefold()
+        if any(term in text for term in ("prop", "道具")):
+            prop_subjects.add(_identity(issue["subject"]))
+        if any(term in text for term in ("scene", "location", "场景", "地点")):
+            scene_subjects.add(_identity(issue["subject"]))
+    if prop_subjects and any(
+        _identity(str(row["subject"])) not in prop_subjects for row in prop_rows
+    ):
+        raise ValueError("prop_anchor subject does not match declared prop subjects")
+    if scene_subjects and any(
+        _identity(str(row["subject"])) not in scene_subjects for row in scene_rows
+    ):
+        raise ValueError("scene_anchor subject does not match declared scene subjects")
 
 
 def validate_reference_pack(
@@ -878,9 +974,10 @@ def validate_reference_pack(
                 if stable_paths is None or path not in stable_paths:
                     raise ValueError("primary_style reference is not a stable page")
         return True
+    if cluster is None:
+        raise ValueError("V4 reference pack validation requires cluster coverage")
     stable_records = _stable_page_records(stable_pages)
-    if cluster is not None:
-        _validate_visual_coverage(cluster, canonical_references, stable_records)
+    _validate_visual_coverage(cluster, canonical_references, stable_records)
     return True
 
 
