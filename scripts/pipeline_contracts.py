@@ -22,6 +22,12 @@ REVIEW_STATES = frozenset(
 
 _PAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9]+(?:\([0-9]+\))?\Z")
 _INPUT_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_WINDOWS_FORBIDDEN_PATH_CHARS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 # Task 3 must remove the integer overload and this marker when manifest
 # initialization supplies source-relative paths directly.
 REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3 = True
@@ -75,6 +81,16 @@ def normalize_relative_image_path(value: object) -> str:
         or any(component in {"", ".", ".."} for component in components)
     ):
         raise ValueError(f"invalid relative image path: {value!r}")
+    for component in components:
+        if (
+            any(ord(character) < 32 for character in component)
+            or any(character in _WINDOWS_FORBIDDEN_PATH_CHARS for character in component)
+            or component.endswith((".", " "))
+        ):
+            raise ValueError(f"invalid Windows relative image path: {value!r}")
+        device_stem = component.split(".", 1)[0].rstrip(" .").upper()
+        if device_stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+            raise ValueError(f"reserved Windows relative image path: {value!r}")
     suffix = PurePath(components[-1]).suffix
     if suffix.casefold() not in _INPUT_IMAGE_EXTENSIONS:
         raise ValueError(f"invalid relative image path extension: {value!r}")
@@ -99,6 +115,8 @@ def make_output_names(inputs: Iterable[object] | int) -> list[str]:
         raise ValueError("inputs must be a non-empty iterable of relative image paths") from exc
     if not names:
         raise ValueError("inputs must not be empty")
+    if len({name.casefold() for name in names}) != len(names):
+        raise ValueError("duplicate output name")
     return names
 
 

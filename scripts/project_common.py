@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ def _normalized_stem(path: Path) -> str:
 
 def page_identity(path: Path) -> tuple[Any, ...]:
     """Return an extension-independent identity with normalized parentheses."""
-    stem = _normalized_stem(path)
+    stem = unicodedata.normalize("NFKC", _normalized_stem(path))
     match = _PAGE_PATTERN.fullmatch(stem)
     if match:
         variant = match.group("variant")

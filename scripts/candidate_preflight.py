@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import ntpath
 import os
 import re
 import unicodedata
@@ -15,7 +14,11 @@ from typing import Any
 
 from PIL import Image, ImageFilter, ImageStat, UnidentifiedImageError
 
-from pipeline_contracts import canonical_hash, validate_bijection
+from pipeline_contracts import (
+    canonical_hash,
+    normalize_relative_image_path,
+    validate_bijection,
+)
 
 
 SCHEMA_VERSION = "1.0"
@@ -750,10 +753,15 @@ def validate_candidate_batch(
     inputs: Iterable[object],
     mappings: Iterable[Mapping[str, Any]],
     preflight_reports: object,
+    *,
+    candidate_root: Path,
     actual_outputs: Iterable[str] | None = None,
     reviews: object = None,
 ) -> bool:
     """Validate strict source/output bijection and ordered candidate reports."""
+    resolved_candidate_root = Path(candidate_root).expanduser().resolve()
+    if not resolved_candidate_root.is_dir():
+        raise ValueError(f"candidate root is not a directory: {resolved_candidate_root}")
     input_rows = list(inputs)
     mapping_rows = list(mappings)
     validate_bijection(input_rows, mapping_rows, actual_outputs=actual_outputs)
@@ -769,8 +777,15 @@ def validate_candidate_batch(
         if report["preflight_id"] in seen_ids:
             raise ValueError("duplicate preflight_id in candidate batch")
         seen_ids.add(report["preflight_id"])
-        output_name = mapping["output_name"]
-        candidate_name = ntpath.basename(report["paths"]["candidate"])
+        output_name = normalize_relative_image_path(mapping["output_name"])
+        candidate_path = Path(report["paths"]["candidate"]).expanduser().resolve()
+        try:
+            candidate_relative = candidate_path.relative_to(resolved_candidate_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"candidate report path is outside candidate root: {candidate_path}"
+            ) from exc
+        candidate_name = normalize_relative_image_path(candidate_relative.as_posix())
         if candidate_name != output_name:
             raise ValueError(
                 f"candidate report order mismatch at index {index}: "

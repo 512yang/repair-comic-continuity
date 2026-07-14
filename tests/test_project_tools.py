@@ -484,6 +484,15 @@ class ComicContinuityToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate page identity"):
             sorted_input_pages(self.root / "输入")
 
+    def test_nfkc_equivalent_page_identity_is_rejected_without_renaming_source(self):
+        fullwidth = self.add_page("Ａ.jpg")
+        ascii_page = self.add_page("A.png")
+        self.assertEqual("Ａ.jpg", fullwidth.name)
+        self.assertEqual("A.png", ascii_page.name)
+
+        with self.assertRaisesRegex(ValueError, "duplicate page identity"):
+            sorted_input_pages(self.root / "输入")
+
     def test_input_inventory_accepts_supported_extensions_recursively(self):
         self.add_page("1.jpg")
         self.add_page("2.jpeg")

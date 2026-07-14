@@ -480,6 +480,7 @@ class CandidatePreflightTests(unittest.TestCase):
                 inputs,
                 mappings,
                 [report_one, report_two],
+                candidate_root=self.root,
                 actual_outputs=["1.jpg", "2.jpg"],
             )
         )
@@ -496,8 +497,40 @@ class CandidatePreflightTests(unittest.TestCase):
                         inputs,
                         bad_mappings,
                         reports,
+                        candidate_root=self.root,
                         actual_outputs=actual,
                     )
+
+    def test_candidate_batch_matches_nested_relative_paths_with_containment(self):
+        module = candidate_preflight()
+        candidate_root = self.root / "candidates"
+        nested_candidate = candidate_root / "chapter" / "1.jpg"
+        nested_candidate.parent.mkdir(parents=True)
+        nested_report = module.run_candidate_preflight(
+            draw_pattern(nested_candidate), self.original, ocr_metadata=VALID_OCR
+        )
+
+        self.assertTrue(
+            module.validate_candidate_batch(
+                ["chapter/1.jpg"],
+                [{"source_page": "chapter/1.jpg", "output_name": "chapter/1.jpg"}],
+                [nested_report],
+                candidate_root=candidate_root,
+                actual_outputs=["chapter/1.jpg"],
+            )
+        )
+
+        outside_report = module.run_candidate_preflight(
+            self.candidate, self.original, ocr_metadata=VALID_OCR
+        )
+        with self.assertRaisesRegex(ValueError, "outside candidate root"):
+            module.validate_candidate_batch(
+                ["candidate.jpg"],
+                [{"source_page": "candidate.jpg", "output_name": "candidate.jpg"}],
+                [outside_report],
+                candidate_root=candidate_root,
+                actual_outputs=["candidate.jpg"],
+            )
 
 
 if __name__ == "__main__":

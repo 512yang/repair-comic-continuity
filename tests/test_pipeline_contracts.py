@@ -65,6 +65,10 @@ class PipelineContractTests(unittest.TestCase):
         self.assertTrue(REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3)
         self.assertEqual(make_output_names(3), ["0001.jpg", "0002.jpg", "0003.jpg"])
 
+    def test_make_output_names_rejects_case_insensitive_duplicates(self):
+        with self.assertRaisesRegex(ValueError, "duplicate output name"):
+            make_output_names(["Chapter/Page.jpg", "chapter/page.JPG"])
+
     def test_normalize_relative_image_path_rejects_unsafe_or_unsupported_paths(self):
         invalid = (
             "",
@@ -74,11 +78,33 @@ class PipelineContractTests(unittest.TestCase):
             "a//b.jpg",
             "a/./b.jpg",
             "page.gif",
+            "control/line\n.jpg",
+            "bad<name.jpg",
+            "bad>name.jpg",
+            'bad"name.jpg',
+            "bad|name.jpg",
+            "bad?name.jpg",
+            "bad*name.jpg",
+            "stream:name.jpg",
+            "folder./page.jpg",
+            "folder /page.jpg",
+            "page.jpg ",
+            "CON.jpg",
+            "dir/prn.PNG",
+            "AUX.txt.jpg",
+            "nul.webp",
+            "COM1.jpeg",
+            "com9.jpg",
+            "LPT1.jpg",
+            "lpt9.jpg",
         )
         for value in invalid:
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "relative image path"):
                     normalize_relative_image_path(value)
+
+        self.assertEqual("COM10.jpg", normalize_relative_image_path("COM10.jpg"))
+        self.assertEqual("LPT10.png", normalize_relative_image_path("LPT10.png"))
 
     def test_validate_bijection_rejects_a_missing_source_mapping(self):
         inputs = ["252.jpg", "253.jpg"]
