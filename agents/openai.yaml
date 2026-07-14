@@ -1,0 +1,4 @@
+interface:
+  display_name: "漫画连续性修复"
+  short_description: "依据小说、人设与上下文监管漫画画面文字和跨页连续性修复"
+  default_prompt: "使用 $repair-comic-continuity 检查并修复当前漫画项目。"
