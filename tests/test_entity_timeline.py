@@ -87,6 +87,7 @@ class EntityTimelineTests(unittest.TestCase):
                 "to_page": "章节十三/0261.PNG",
                 "kind": "transfer_and_transformation",
                 "source_ref": "novel:120-145",
+                "changed_fields": ["owner", "material"],
             }
         ]
 
@@ -94,7 +95,9 @@ class EntityTimelineTests(unittest.TestCase):
 
         self.assertEqual("1.0", timeline["schema_version"])
         self.assertTrue(validate_timeline(timeline))
-        self.assertNotIn("changed_fields", timeline["transitions"][0])
+        self.assertEqual(
+            ["material", "owner"], timeline["transitions"][0]["changed_fields"]
+        )
 
     def test_state_is_canonical_and_noncritical_shot_details_are_excluded(self):
         rows = [
@@ -189,6 +192,134 @@ class EntityTimelineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(before, rows)
         self.assertEqual(64, len(first["content_hash"]))
+
+    def test_natural_sort_ties_are_deterministic_across_input_permutations(self):
+        rows = [
+            observation("character", "甲", "章节/a1.jpg", {"hair": "black"}),
+            observation("character", "甲", "章节/a01.jpg", {"hair": "black"}),
+        ]
+
+        first = build_timeline(rows, [])
+        second = build_timeline(list(reversed(rows)), [])
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            ["章节/a01.jpg", "章节/a1.jpg"],
+            [item["page"] for item in first["entities"][0]["observations"]],
+        )
+
+    def test_nested_partial_state_is_deep_merged_without_false_change(self):
+        rows = [
+            observation(
+                "character",
+                "甲",
+                "001.jpg",
+                {"hair": {"color": "black", "style": "tied"}},
+            ),
+            observation("character", "甲", "050.jpg", {"hair": {"style": "tied"}}),
+        ]
+        self.assertTrue(validate_timeline(build_timeline(rows, [])))
+
+        contradictory = rows + [
+            observation("character", "甲", "099.jpg", {"hair": {"color": "white"}})
+        ]
+        with self.assertRaisesRegex(ValueError, r"050\.jpg.*099\.jpg.*hair"):
+            validate_timeline(build_timeline(contradictory, []))
+
+    def test_unknown_observation_and_state_fields_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"observation.*story_ordr"):
+            build_timeline(
+                [
+                    {
+                        **observation("character", "甲", "001.jpg", {"hair": "black"}),
+                        "story_ordr": 1,
+                    }
+                ],
+                [],
+            )
+        with self.assertRaisesRegex(ValueError, r"state.*hairr"):
+            build_timeline(
+                [observation("character", "甲", "001.jpg", {"hairr": "black"})],
+                [],
+            )
+
+        timeline = build_timeline(
+            [
+                observation(
+                    "character",
+                    "甲",
+                    "001.jpg",
+                    {
+                        "hair": "black",
+                        "pose": "standing",
+                        "grip": "one-handed",
+                        "expression": "calm",
+                        "camera_angle": "close-up",
+                        "action": "writing",
+                        "arrangement": "left",
+                    },
+                )
+            ],
+            [],
+        )
+        self.assertEqual(
+            {"hair": "black"}, timeline["entities"][0]["observations"][0]["state"]
+        )
+
+    def test_facial_hair_aliases_are_recursive_and_conflicts_are_rejected(self):
+        timeline = build_timeline(
+            [
+                observation(
+                    "character",
+                    "甲",
+                    "001.jpg",
+                    {
+                        "facial_hair": {
+                            "regions": {"mustache": {"color": "black"}},
+                            "mustache": "thin",
+                        },
+                        "moustache": "thin",
+                    },
+                )
+            ],
+            [],
+        )
+        facial_hair = timeline["entities"][0]["observations"][0]["state"][
+            "facial_hair"
+        ]
+        self.assertEqual("thin", facial_hair["moustache"])
+        self.assertEqual(
+            {"moustache": {"color": "black"}}, facial_hair["regions"]
+        )
+
+        for state in (
+            {"facial_hair": {"mustache": "thin"}, "moustache": "thick"},
+            {"facial_hair": {"mustache": "thin", "moustache": "thick"}},
+        ):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(ValueError, "conflicting facial_hair.moustache"):
+                    build_timeline([observation("character", "甲", "001.jpg", state)], [])
+
+    def test_multi_field_change_requires_explicit_changed_fields(self):
+        rows = [
+            observation("prop", "笔", "001.jpg", {"owner": "甲", "material": "wood"}),
+            observation("prop", "笔", "002.jpg", {"owner": "乙", "material": "gold"}),
+        ]
+        evidence_without_fields = [
+            {
+                "entity_type": "prop",
+                "entity_id": "笔",
+                "from_page": "001.jpg",
+                "to_page": "002.jpg",
+                "kind": "transfer_and_transformation",
+                "source_ref": "novel:10-20",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError, r"multiple critical fields.*changed_fields"
+        ):
+            validate_timeline(build_timeline(rows, evidence_without_fields))
 
     def test_unicode_nested_paths_and_nfkc_identity_are_supported(self):
         rows = [

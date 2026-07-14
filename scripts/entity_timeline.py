@@ -77,6 +77,37 @@ _CRITICAL_FIELDS = {
 
 _UNKNOWN_TEXT = frozenset({"unknown", "未知", "不明", "未确定", "不确定"})
 _FACIAL_HAIR_FIELDS = frozenset({"beard", "moustache", "mustache", "sideburn", "stubble"})
+_FACIAL_HAIR_KEY_ALIASES = {
+    "beard": "beard",
+    "moustache": "moustache",
+    "mustache": "moustache",
+    "sideburn": "sideburn",
+    "sideburns": "sideburn",
+    "stubble": "stubble",
+}
+_NONCRITICAL_STATE_FIELDS = frozenset(
+    {
+        "pose",
+        "grip",
+        "expression",
+        "camera_angle",
+        "camera_distance",
+        "shot_size",
+        "framing",
+        "action",
+        "temporary_action",
+        "arrangement",
+        "noncritical_arrangement",
+        "action_equivalence",
+        "gesture",
+        "gaze",
+        "body_position",
+        "hand_count",
+    }
+)
+_OBSERVATION_FIELDS = frozenset(
+    {"entity_type", "entity_id", "page", "state", "story_order", "confidence"}
+)
 _TRANSITION_FIELDS = frozenset(
     {
         "entity_type",
@@ -172,6 +203,16 @@ def _canonical_state(entity_type: str, value: object) -> dict[str, object]:
         raise ValueError("state must be a mapping")
     canonical = _canonical_json_value(value, "state")
     assert isinstance(canonical, dict)
+    allowed_fields = set(_CRITICAL_FIELDS[entity_type]) | set(
+        _NONCRITICAL_STATE_FIELDS
+    )
+    if entity_type == "character":
+        allowed_fields.update(_FACIAL_HAIR_FIELDS)
+    unknown_fields = set(canonical) - allowed_fields
+    if unknown_fields:
+        raise ValueError(
+            f"unknown state fields for {entity_type}: {sorted(unknown_fields)!r}"
+        )
     result: dict[str, object] = {}
     for field in sorted(_CRITICAL_FIELDS[entity_type]):
         if field not in canonical:
@@ -183,14 +224,16 @@ def _canonical_state(entity_type: str, value: object) -> dict[str, object]:
         facial_hair = result.get("facial_hair")
         if facial_hair is not None and not isinstance(facial_hair, dict):
             raise ValueError("state facial_hair must be a mapping")
-        facial_hair_state = dict(facial_hair or {})
+        facial_hair_state = _canonicalize_facial_hair(facial_hair or {})
         for alias in sorted(_FACIAL_HAIR_FIELDS):
             if alias not in canonical:
                 continue
             cleaned = _remove_unknown(canonical[alias])
             if cleaned is _MISSING:
                 continue
-            canonical_alias = "moustache" if alias == "mustache" else alias
+            canonical_alias = _FACIAL_HAIR_KEY_ALIASES[alias]
+            if isinstance(cleaned, dict):
+                cleaned = _canonicalize_facial_hair(cleaned)
             if (
                 canonical_alias in facial_hair_state
                 and facial_hair_state[canonical_alias] != cleaned
@@ -206,9 +249,28 @@ def _canonical_state(entity_type: str, value: object) -> dict[str, object]:
     return result
 
 
-def _natural_path_key(path: str) -> tuple[tuple[tuple[int, object], ...], ...]:
-    components = unicodedata.normalize("NFKC", path).casefold().split("/")
-    return tuple(
+def _canonicalize_facial_hair(
+    value: Mapping[str, object], path: str = "facial_hair"
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for raw_key, raw_value in value.items():
+        folded_key = unicodedata.normalize("NFKC", raw_key).strip().casefold()
+        key = _FACIAL_HAIR_KEY_ALIASES.get(folded_key, raw_key)
+        item = (
+            _canonicalize_facial_hair(raw_value, f"{path}.{key}")
+            if isinstance(raw_value, Mapping)
+            else raw_value
+        )
+        if key in result and result[key] != item:
+            raise ValueError(f"state has conflicting {path}.{key} values")
+        result[key] = item
+    return {key: result[key] for key in sorted(result)}
+
+
+def _natural_path_key(path: str) -> tuple[object, ...]:
+    normalized_exact = unicodedata.normalize("NFKC", path)
+    components = normalized_exact.casefold().split("/")
+    natural = tuple(
         tuple(
             (0, int(part)) if part.isdigit() else (1, part)
             for part in re.split(r"(\d+)", component)
@@ -216,6 +278,7 @@ def _natural_path_key(path: str) -> tuple[tuple[tuple[int, object], ...], ...]:
         )
         for component in components
     )
+    return natural, normalized_exact
 
 
 def _page_identity(page: str) -> str:
@@ -234,6 +297,12 @@ def _canonical_observations(
     for index, raw in enumerate(observations):
         if not isinstance(raw, Mapping):
             raise ValueError(f"observation at index {index} must be a mapping")
+        unknown_keys = set(raw) - _OBSERVATION_FIELDS
+        if unknown_keys:
+            raise ValueError(
+                "observation at index "
+                f"{index} has unsupported fields: {sorted(map(str, unknown_keys))!r}"
+            )
         entity_type = _entity_type(raw.get("entity_type"))
         entity_id = _required_text(raw.get("entity_id"), "entity_id")
         try:
@@ -420,8 +489,7 @@ def _validate_changes(
             continue
         effective = dict(observations[0]["state"])
         for previous, current in zip(observations, observations[1:]):
-            next_effective = dict(effective)
-            next_effective.update(current["state"])
+            next_effective = _deep_merge_state(effective, current["state"])
             changed = sorted(
                 field
                 for field in _CRITICAL_FIELDS[key[0]]
@@ -437,6 +505,13 @@ def _validate_changes(
                         "unsupported state transition for "
                         f"{key[0]} {previous['entity_id']!r} between "
                         f"{previous['page']!r} and {current['page']!r}: "
+                        f"fields {changed!r}"
+                    )
+                if len(changed) > 1 and "changed_fields" not in supplied:
+                    raise ValueError(
+                        "transition covering multiple critical fields requires explicit "
+                        f"changed_fields for {key[0]} {previous['entity_id']!r} "
+                        f"between {previous['page']!r} and {current['page']!r}: "
                         f"fields {changed!r}"
                     )
                 if (
@@ -460,6 +535,20 @@ def _validate_changes(
 
     if len(consumed) != len(transitions):
         raise ValueError("transition does not match an adjacent critical state change")
+
+
+def _deep_merge_state(
+    previous: Mapping[str, object], current: Mapping[str, object]
+) -> dict[str, object]:
+    """Merge partial mapping facts; lists and scalar values replace atomically."""
+    result: dict[str, object] = dict(previous)
+    for key, value in current.items():
+        prior_value = result.get(key, _MISSING)
+        if isinstance(prior_value, Mapping) and isinstance(value, Mapping):
+            result[key] = _deep_merge_state(prior_value, value)
+        else:
+            result[key] = value
+    return result
 
 
 def build_timeline(observations: object, transitions: object) -> dict[str, Any]:
