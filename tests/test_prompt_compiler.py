@@ -96,6 +96,136 @@ def base_text_spec():
     }
 
 
+def reviewed(reference_id):
+    return {
+        "status": "passed",
+        "full_size": True,
+        "reviewer": "reviewer-b",
+        "reviewed_at": "2026-07-15T10:00:00+08:00",
+        "evidence_path": f"evidence/reviews/{reference_id}.json",
+        "evidence_sha256": "e" * 64,
+    }
+
+
+def base_v4_spec():
+    page_path = "章节一/0252（1）.png"
+    source_page = {
+        "path": page_path,
+        "sha256": "a" * 64,
+        "width": 1120,
+        "height": 1493,
+    }
+    stable_pages = [
+        {
+            "path": "稳定页/0251.png",
+            "sha256": "b" * 64,
+            "review": reviewed("style-0251"),
+        }
+    ]
+    return {
+        "contract_version": "v4",
+        "repair_profile": "continuity_first_full_page",
+        "visual_mode": "full_page_redraw",
+        "page_id": page_path,
+        "cluster_id": "cluster-rain",
+        "characters": ["邓正虎"],
+        "scene_summary": "人物仍在同一场景中，保持前后页连续性。",
+        "novel_facts": ["小说动作细节只作剧情事实，不要求逐镜复刻。"],
+        "source_page": source_page,
+        "target_metadata": copy.deepcopy(source_page),
+        "target_dimensions": {"width": 1120, "height": 1493},
+        "cluster": {
+            "cluster_id": "cluster-rain",
+            "member_pages": [page_path],
+            "cast": ["邓正虎"],
+            "has_visual_tasks": True,
+            "visual_targets": [page_path],
+            "canary_page": page_path,
+            "repair_characters": ["邓正虎"],
+            "issue_schedule": ["character_identity"],
+        },
+        "references": [
+            {
+                "path": page_path,
+                "role": "target_composition",
+                "subject": page_path,
+                "source": "immutable_input",
+                "sha256": "a" * 64,
+            },
+            {
+                "path": "稳定页/0251.png",
+                "role": "comic_style_anchor",
+                "subject": "comic_style",
+                "source": "reviewed_comic_page",
+                "review": reviewed("style-0251"),
+                "sha256": "b" * 64,
+            },
+            {
+                "path": "人物参考图/邓正虎.png",
+                "role": "identity_only",
+                "subject": "邓正虎",
+                "source": "character_sheet",
+                "review": reviewed("identity-deng"),
+                "sha256": "c" * 64,
+            },
+        ],
+        "stable_pages": stable_pages,
+        "locks": [
+            {"category": "composition", "text": "保持原分镜拓扑与阅读顺序。"},
+            {"category": "identity", "text": "胡须、发型和服装遵循身份锚点。"},
+            {"category": "continuity", "text": "优先修复前后页一致性。"},
+            {"category": "style", "text": "只使用已审核漫画页作为画风锚点。"},
+        ],
+        "effective_rules": [],
+    }
+
+
+def base_v4_text_spec():
+    novel_text = "他在水里练功，最近修炼遇到瓶颈。"
+    novel_hash = hashlib.sha256(novel_text.encode("utf-8")).hexdigest()
+    return {
+        "contract_version": "v4",
+        "page_id": "章节一/0252（1）.png",
+        "cluster_id": "cluster-rain",
+        "mode": "page_reset",
+        "canvas_size": {"width": 1120, "height": 1493},
+        "source_has_ordinary_text": True,
+        "blocks": [
+            {
+                "block_id": "dialogue-1",
+                "type": "dialogue",
+                "panel_id": "panel-1",
+                "shape": "speech_balloon",
+                "bbox": [100, 120, 420, 330],
+                "orientation": "horizontal",
+                "reading_order": 1,
+                "font_profile": "dialogue_regular",
+                "source_balloon_exists": True,
+                "source_text": "他在水里练功。",
+                "replacement_text": novel_text[0:8],
+                "speaker": "邓正虎",
+                "source_offsets": {
+                    "start": 0,
+                    "end": 8,
+                    "novel_sha256": novel_hash,
+                    "source_reference": "丹符神尊.txt",
+                },
+            }
+        ],
+        "source_novel_hash": novel_hash,
+        "source_novel_text": novel_text,
+        "source_novel_reference": "丹符神尊.txt",
+        "page_density_budget": {
+            "max_total_characters": 80,
+            "max_page_chars_per_10000_px2": 1.0,
+            "max_block_chars_per_10000_px2": 2.0,
+            "max_line_characters": 14,
+        },
+        "original_overlap_evidence": [],
+        "art_text_allowlist": [],
+    }
+
+
 def text_prompt_api():
     module = prompt_compiler()
     required = (
@@ -745,6 +875,256 @@ class TextRepairPromptCompilerTests(unittest.TestCase):
         self.assertNotIn("source_novel_text", request)
         self.assertNotIn(spec["source_novel_text"], request["prompt"])
         self.assertIn(spec["source_novel_hash"], request["prompt"])
+
+
+class V4FullPageRedrawCompilerTests(unittest.TestCase):
+    def test_default_visual_profile_is_full_page_textless_and_topology_locked(self):
+        module = prompt_compiler()
+        spec = base_v4_spec()
+
+        request = module.compile_redraw_request(spec)
+
+        self.assertEqual("continuity_first_full_page", request["repair_profile"])
+        self.assertTrue(request["textless_output"])
+        self.assertEqual({"width": 1120, "height": 1493}, request["target_dimensions"])
+        self.assertIn("preserve panel topology", request["compiled_prompt"])
+        self.assertIn("reading order", request["compiled_prompt"])
+        self.assertIn("continuity-first", request["compiled_prompt"])
+        self.assertIn("no letters", request["compiled_prompt"])
+        self.assertIn("no dialogue", request["compiled_prompt"])
+        self.assertIn("no SFX", request["compiled_prompt"])
+
+    def test_v4_request_binds_original_target_and_reviewed_style_anchor(self):
+        module = prompt_compiler()
+        source = base_v4_spec()
+        before = copy.deepcopy(source)
+        first = module.compile_redraw_request(source)
+        second = module.compile_redraw_request(copy.deepcopy(source))
+
+        self.assertEqual(before, source)
+        self.assertEqual(first, second)
+        self.assertEqual(first["prompt_hash"], module.prompt_fingerprint(first["compiled_prompt"]))
+        self.assertEqual("a" * 64, first["source_page_sha256"])
+        self.assertEqual("章节一/0252（1）.png", first["source_page_path"])
+        self.assertIn("ROLE=target_composition", first["compiled_prompt"])
+        self.assertIn("SOURCE=immutable_input", first["compiled_prompt"])
+        self.assertIn("ROLE=comic_style_anchor", first["compiled_prompt"])
+        self.assertIn("ROLE=identity_only", first["compiled_prompt"])
+        self.assertIn("identity only", first["compiled_prompt"])
+        self.assertIn("does not provide art style", first["compiled_prompt"])
+
+    def test_v4_rejects_missing_profile_dimension_drift_and_target_binding_drift(self):
+        module = prompt_compiler()
+        cases = []
+        missing_profile = base_v4_spec()
+        missing_profile.pop("repair_profile")
+        cases.append((missing_profile, "repair_profile"))
+        wrong_dimensions = base_v4_spec()
+        wrong_dimensions["target_dimensions"]["width"] += 1
+        cases.append((wrong_dimensions, "dimensions"))
+        wrong_target_hash = base_v4_spec()
+        wrong_target_hash["references"][0]["sha256"] = "f" * 64
+        cases.append((wrong_target_hash, "target_composition"))
+        wrong_target_source = base_v4_spec()
+        wrong_target_source["references"][0]["source"] = "reviewed_comic_page"
+        cases.append((wrong_target_source, "target_composition|source"))
+
+        for spec, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.compile_redraw_request(spec)
+
+    def test_v4_rejects_unreviewed_style_and_character_sheet_as_style(self):
+        module = prompt_compiler()
+        unreviewed = base_v4_spec()
+        unreviewed["references"][1].pop("review")
+        character_style = base_v4_spec()
+        character_style["references"][1].update(
+            path="人物参考图/邓正虎.png",
+            subject="邓正虎",
+            source="reviewed_comic_page",
+        )
+
+        for spec in (unreviewed, character_style):
+            with self.subTest(spec=spec["references"][1]):
+                with self.assertRaisesRegex(ValueError, "comic_style_anchor|review"):
+                    module.compile_redraw_request(spec)
+
+    def test_v4_does_not_turn_equivalent_novel_action_into_redraw_instruction(self):
+        module = prompt_compiler()
+        prompt = module.compile_redraw_request(base_v4_spec())["compiled_prompt"]
+
+        self.assertIn("not shot-for-shot", prompt)
+        self.assertIn("equivalent action", prompt)
+        self.assertIn("must not become redraw instructions", prompt)
+
+    def test_local_modes_cannot_silently_use_default_profile(self):
+        module = prompt_compiler()
+        for mode in ("crop", "local_repair", "inpaint"):
+            spec = base_v4_spec()
+            spec["visual_mode"] = mode
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "non-default project profile"):
+                    module.compile_redraw_request(spec)
+
+        explicit = base_v4_spec()
+        explicit.update(
+            visual_mode="inpaint",
+            repair_profile="project_local_inpaint",
+            project_profile="project_local_inpaint",
+        )
+        with self.assertRaisesRegex(ValueError, "separate non-default compiler"):
+            module.compile_redraw_request(explicit)
+
+
+class V4TextGeometryCompilerTests(unittest.TestCase):
+    def test_page_reset_request_contains_exact_declaration_hash_and_geometry(self):
+        module = prompt_compiler()
+        source = base_v4_text_spec()
+        before = copy.deepcopy(source)
+        first = module.compile_text_repair_request(source)
+        second = module.compile_text_repair_request(copy.deepcopy(source))
+
+        self.assertEqual(before, source)
+        self.assertEqual(first, second)
+        self.assertTrue(first["only_declared_blocks"])
+        self.assertEqual({"width": 1120, "height": 1493}, first["canvas_size"])
+        self.assertEqual(first["declaration_hash"], first["declaration"]["declaration_hash"])
+        self.assertEqual([100, 120, 420, 330], first["declaration"]["blocks"][0]["bbox"])
+        self.assertIn("only declared original text regions", first["prompt"])
+        self.assertIn("must not erase artwork outside", first["prompt"])
+        self.assertIn("deterministic typesetting stage", first["prompt"])
+        self.assertNotIn("render Chinese ordinary text", first["prompt"])
+
+    def test_new_dialogue_balloon_is_rejected(self):
+        module = prompt_compiler()
+        spec = base_v4_text_spec()
+        spec["blocks"][0]["source_balloon_exists"] = False
+
+        with self.assertRaisesRegex(ValueError, "new dialogue balloon"):
+            module.compile_text_repair_request(spec)
+
+    def test_geometry_identity_order_and_supported_enums_are_strict(self):
+        module = prompt_compiler()
+        mutations = []
+        for field, value, message in (
+            ("bbox", [100, 120, 1200, 330], "bbox|canvas"),
+            ("bbox", [100, 120, 100, 330], "bbox"),
+            ("orientation", "diagonal", "orientation"),
+            ("shape", "new_box", "shape"),
+            ("type", "thought", "type"),
+            ("font_profile", "unapproved_font", "font_profile"),
+            ("reading_order", True, "reading_order"),
+        ):
+            spec = base_v4_text_spec()
+            spec["blocks"][0][field] = value
+            mutations.append((spec, message))
+        duplicate = base_v4_text_spec()
+        duplicate["blocks"].append(copy.deepcopy(duplicate["blocks"][0]))
+        duplicate["blocks"][1]["source_offsets"].update(start=8, end=12)
+        duplicate["blocks"][1]["replacement_text"] = duplicate["source_novel_text"][8:12]
+        mutations.append((duplicate, "block_id"))
+        duplicate_order = base_v4_text_spec()
+        second = copy.deepcopy(duplicate_order["blocks"][0])
+        second.update(block_id="dialogue-2", bbox=[500, 120, 800, 330])
+        second["source_offsets"].update(start=8, end=12)
+        second["replacement_text"] = duplicate_order["source_novel_text"][8:12]
+        duplicate_order["blocks"].append(second)
+        mutations.append((duplicate_order, "reading_order"))
+
+        for spec, message in mutations:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.compile_text_repair_request(spec)
+
+    def test_caption_and_sfx_require_explicit_source_region_and_allowed_shape(self):
+        module = prompt_compiler()
+        for block_type, shape, speaker, font in (
+            ("caption", "caption_box", "narrator", "caption_regular"),
+            ("sfx", "sfx_region", "sfx", "sfx_display"),
+        ):
+            spec = base_v4_text_spec()
+            spec["blocks"][0].update(
+                type=block_type,
+                shape=shape,
+                speaker=speaker,
+                font_profile=font,
+                source_balloon_exists=False,
+            )
+            with self.subTest(block_type=block_type):
+                with self.assertRaisesRegex(ValueError, "source_region"):
+                    module.compile_text_repair_request(spec)
+            spec["blocks"][0]["source_region"] = {
+                "bbox": [100, 120, 420, 330],
+                "source_page_sha256": "a" * 64,
+            }
+            request = module.compile_text_repair_request(spec)
+            self.assertTrue(request["only_declared_blocks"])
+
+    def test_overlap_requires_hash_bound_original_overlap_evidence(self):
+        module = prompt_compiler()
+        spec = base_v4_text_spec()
+        second = copy.deepcopy(spec["blocks"][0])
+        second.update(block_id="dialogue-2", bbox=[300, 200, 600, 400], reading_order=2)
+        second["source_offsets"].update(start=8, end=12)
+        second["replacement_text"] = spec["source_novel_text"][8:12]
+        spec["blocks"].append(second)
+
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            module.compile_text_repair_request(spec)
+
+        spec["original_overlap_evidence"] = [{
+            "block_ids": ["dialogue-1", "dialogue-2"],
+            "evidence_path": "evidence/text-overlap/0252.json",
+            "evidence_sha256": "d" * 64,
+        }]
+        module.compile_text_repair_request(spec)
+
+    def test_source_offsets_are_exact_hash_bound_and_monotonic(self):
+        module = prompt_compiler()
+        mutations = []
+        for field, value, message in (
+            ("novel_sha256", "f" * 64, "novel_sha256"),
+            ("source_reference", "../丹符神尊.txt", "source_reference"),
+            ("start", 8, "replacement_text|offset"),
+            ("end", 0, "offset"),
+        ):
+            spec = base_v4_text_spec()
+            spec["blocks"][0]["source_offsets"][field] = value
+            mutations.append((spec, message))
+        missing = base_v4_text_spec()
+        missing["blocks"][0]["source_offsets"].pop("novel_sha256")
+        mutations.append((missing, "source_offsets"))
+
+        for spec, message in mutations:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.compile_text_repair_request(spec)
+
+    def test_density_budget_is_area_and_line_bound_without_adding_balloon(self):
+        module = prompt_compiler()
+        for budget_field in (
+            "max_total_characters",
+            "max_page_chars_per_10000_px2",
+            "max_block_chars_per_10000_px2",
+            "max_line_characters",
+        ):
+            spec = base_v4_text_spec()
+            spec["page_density_budget"][budget_field] = 0.00001
+            with self.subTest(budget_field=budget_field):
+                with self.assertRaisesRegex(ValueError, "density"):
+                    module.compile_text_repair_request(spec)
+
+    def test_textless_source_cannot_introduce_blocks(self):
+        module = prompt_compiler()
+        spec = base_v4_text_spec()
+        spec["source_has_ordinary_text"] = False
+        with self.assertRaisesRegex(ValueError, "textless source"):
+            module.compile_text_repair_request(spec)
+
+        spec["blocks"] = []
+        request = module.compile_text_repair_request(spec)
+        self.assertEqual([], request["declaration"]["blocks"])
 
 
 if __name__ == "__main__":
