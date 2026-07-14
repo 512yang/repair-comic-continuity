@@ -210,6 +210,9 @@ class ComicContinuityToolsTests(unittest.TestCase):
                     "location": "fixture-location",
                     "story_time": "fixture-time",
                     "scene_id": "fixture-scene",
+                    # This V3 complete-fixture models processed visual pages, so it
+                    # must declare visual work under the V4 canary contract.
+                    "has_visual_task": True,
                 }
                 for output_name in output_names
             ]

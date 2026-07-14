@@ -12,7 +12,11 @@ from typing import Any
 
 from failure_learning import FAILURE_CODES, RULE_SCOPES
 from pipeline_contracts import canonical_hash, normalize_page_id
-from scene_clusters import REFERENCE_ROLES, validate_reference_pack
+from scene_clusters import (
+    LEGACY_REFERENCE_ROLES,
+    REFERENCE_ROLES,
+    validate_reference_pack,
+)
 
 
 PROMPT_VERSION = "repair-comic-continuity-redraw-v1"
@@ -187,7 +191,7 @@ def _normalize_references(
         if set(reference) != _REFERENCE_KEYS:
             raise ValueError(f"references[{index}] must contain path and role")
         role = _text(reference["role"], f"references[{index}].role")
-        if role not in REFERENCE_ROLES:
+        if role not in REFERENCE_ROLES | LEGACY_REFERENCE_ROLES:
             raise ValueError(f"unknown reference role: {role!r}")
         path = _path_text(reference["path"], f"references[{index}].path")
         references.append({"path": path, "role": role})
