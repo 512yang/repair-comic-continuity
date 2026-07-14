@@ -531,8 +531,15 @@ def _build_packs(
             }
             for record in reference_records
         )
-        pack = build_reference_pack(cluster, references, stable_pages=[style_path])
-        bound_clusters.append(bind_reference_pack(cluster, pack))
+        pack = build_reference_pack(
+            cluster,
+            references,
+            stable_pages=[style_path],
+            contract_version="v3",
+        )
+        bound_clusters.append(
+            bind_reference_pack(cluster, pack, contract_version="v3")
+        )
         packs.append(pack)
     return bound_clusters, packs
 
@@ -1693,7 +1700,10 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
             continue
         try:
             rebuilt = build_reference_pack(
-                {"cluster_id": cluster_id}, references, stable_pages=stable_pages
+                {"cluster_id": cluster_id},
+                references,
+                stable_pages=stable_pages,
+                contract_version="v3",
             )
         except ValueError as exc:
             errors.append(f"reference pack invalid: {exc}")

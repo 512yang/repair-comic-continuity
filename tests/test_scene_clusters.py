@@ -23,7 +23,14 @@ def make_page(page_id, **overrides):
 
 
 def reviewed(reference_id):
-    return {"status": "reviewed", "evidence_id": reference_id}
+    return {
+        "status": "passed",
+        "full_size": True,
+        "reviewer": "reviewer-b",
+        "reviewed_at": "2026-07-15T10:00:00+08:00",
+        "evidence_path": f"evidence/reviews/{reference_id}.json",
+        "evidence_sha256": "e" * 64,
+    }
 
 
 def visual_cluster(**overrides):
@@ -98,6 +105,38 @@ class SceneKeyTests(unittest.TestCase):
 
 
 class SceneClusterTests(unittest.TestCase):
+    def test_unknown_semantics_are_single_page_unresolved_blockers_not_fixed_batches(self):
+        pages = [
+            {
+                "page_id": str(index),
+                "chapter": None,
+                "location": None,
+                "story_time": None,
+                "scene_id": None,
+            }
+            for index in range(1, 46)
+        ]
+
+        clusters = scene_clusters.build_scene_clusters(pages)
+
+        self.assertEqual(len(clusters), 45)
+        self.assertTrue(all(len(row["member_pages"]) == 1 for row in clusters))
+        self.assertTrue(all(row["blocked"] for row in clusters))
+        self.assertTrue(all(row["semantic_status"] == "unresolved" for row in clusters))
+        self.assertTrue(
+            all("UNRESOLVED_SEMANTIC_BOUNDARY" in row["blocker_codes"] for row in clusters)
+        )
+        self.assertTrue(
+            all(
+                row["boundary_reason"]
+                == {
+                    "start": ["unresolved_semantic_boundary"],
+                    "end": ["unresolved_semantic_boundary"],
+                }
+                for row in clusters
+            )
+        )
+
     def test_cluster_size_controls_distinguish_semantic_short_from_legacy_fragment(self):
         normal = scene_clusters.cluster_size_controls(20, 10, False)
         self.assertFalse(normal["undersized"])
@@ -165,6 +204,14 @@ class SceneClusterTests(unittest.TestCase):
             ):
                 self.assertIn(field, cluster)
             self.assertFalse(cluster["blocked"])
+
+    def test_scene_fingerprint_binds_explicit_transition(self):
+        base = make_page("1", cast=["邓正虎"])
+        before = scene_clusters.build_scene_clusters([base], min_size=1)[0]
+        after = scene_clusters.build_scene_clusters(
+            [{**base, "explicit_transition": "翌日清晨"}], min_size=1
+        )[0]
+        self.assertNotEqual(before["scene_fingerprint"], after["scene_fingerprint"])
 
     def test_long_semantic_scene_may_split_without_crossing_semantic_boundary(self):
         pages = [make_page(index) for index in range(1, 21)]
@@ -254,6 +301,32 @@ class SceneClusterTests(unittest.TestCase):
 
 
 class ReferencePackTests(unittest.TestCase):
+    def test_v4_missing_trace_fields_never_falls_back_to_legacy(self):
+        reference = {
+            "path": "人物参考图/邓正虎.png",
+            "role": "identity_only",
+            "sha256": "a" * 64,
+        }
+        with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+            scene_clusters.build_reference_pack(visual_cluster(), [reference])
+        self.assertEqual(raised.exception.code, "MISSING_REFERENCE_FIELD")
+
+    def test_mixed_v3_v4_reference_records_are_structurally_rejected(self):
+        references = complete_references() + [
+            {"path": "legacy/0188.png", "role": "adjacent_style", "sha256": "f" * 64}
+        ]
+        with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+            scene_clusters.build_reference_pack(visual_cluster(), references)
+        self.assertEqual(raised.exception.code, "MIXED_REFERENCE_SCHEMA")
+
+        with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+            scene_clusters.build_reference_pack(
+                {"cluster_id": "legacy-cluster"},
+                [complete_references()[2]],
+                contract_version="v3",
+            )
+        self.assertEqual(raised.exception.code, "MIXED_REFERENCE_SCHEMA")
+
     def test_scene_pipeline_documents_explicit_reference_pack_binding(self):
         reference = (
             Path(__file__).resolve().parents[1]
@@ -292,6 +365,7 @@ class ReferencePackTests(unittest.TestCase):
                 "subject": "刘正胤",
                 "source": "character_sheet",
                 "review": reviewed("identity-review-1"),
+                "sha256": "a" * 64,
             }
         ]
 
@@ -305,6 +379,7 @@ class ReferencePackTests(unittest.TestCase):
             {
                 "path": "输入/稳定页/0188.png",
                 "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
             }
         ]
 
@@ -317,16 +392,28 @@ class ReferencePackTests(unittest.TestCase):
         self.assertEqual(first["cluster_id"], cluster["cluster_id"])
         self.assertEqual(
             first["reference_pack_id"],
-            canonical_hash({"cluster_id": cluster["cluster_id"], "references": first["references"]}),
+            canonical_hash(
+                {
+                    "cluster_id": cluster["cluster_id"],
+                    "references": first["references"],
+                    "stable_pages": first["stable_pages"],
+                }
+            ),
         )
         self.assertTrue(all(row["subject"] and row["source"] for row in first["references"]))
 
     def test_visual_pack_requires_each_target_composition_and_reviewed_style_anchor(self):
-        stable_pages = [{"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1")}]
+        stable_pages = [
+            {
+                "path": "输入/稳定页/0188.png",
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
         cases = {
             "target composition": [row for row in complete_references() if row["role"] != "target_composition"],
             "reviewed comic_style_anchor": [
-                {**row, "review": {"status": "pending", "evidence_id": "style-review-1"}}
+                {**row, "review": {**reviewed("style-review-1"), "status": "pending"}}
                 if row["role"] == "comic_style_anchor"
                 else row
                 for row in complete_references()
@@ -348,19 +435,115 @@ class ReferencePackTests(unittest.TestCase):
                 "subject": "天朗真人",
                 "source": "reviewed_comic_identity_anchor",
                 "review": reviewed("identity-comic-review-1"),
+                "sha256": "f" * 64,
             }
         )
         stable_pages = [
-            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1")},
-            {"path": "输入/稳定页/天朗真人-正脸.png", "review": reviewed("identity-comic-review-1")},
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64},
+            {"path": "输入/稳定页/天朗真人-正脸.png", "review": reviewed("identity-comic-review-1"), "sha256": "f" * 64},
         ]
 
         pack = scene_clusters.build_reference_pack(visual_cluster(), refs, stable_pages=stable_pages)
 
         self.assertEqual(pack["cluster_id"], "cluster-a")
 
+    def test_comic_identity_anchor_requires_passed_full_size_review_evidence(self):
+        references = [row for row in complete_references() if row.get("subject") != "天朗真人"]
+        bad_reviews = (
+            {**reviewed("identity-comic-review-1"), "status": "pending"},
+            {**reviewed("identity-comic-review-1"), "status": "reviewed"},
+            {**reviewed("identity-comic-review-1"), "full_size": False},
+        )
+        for review in bad_reviews:
+            with self.subTest(review=review):
+                candidate = references + [
+                    {
+                        "path": "输入/稳定页/天朗真人-正脸.png",
+                        "role": "comic_style_anchor",
+                        "subject": "天朗真人",
+                        "source": "reviewed_comic_identity_anchor",
+                        "review": review,
+                        "sha256": "f" * 64,
+                    }
+                ]
+                stable_pages = [
+                    {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64},
+                    {"path": "输入/稳定页/天朗真人-正脸.png", "review": review, "sha256": "f" * 64},
+                ]
+                with self.assertRaisesRegex(ValueError, "passed|full-size"):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(), candidate, stable_pages=stable_pages
+                    )
+
+    def test_character_sheet_cannot_claim_comic_style_anchor_role(self):
+        references = complete_references()
+        references[1] = {
+            **references[1],
+            "path": "人物参考图/邓正虎.png",
+            "source": "character_sheet",
+        }
+        stable_pages = [
+            {"path": "人物参考图/邓正虎.png", "review": reviewed("fake-style"), "sha256": "b" * 64}
+        ]
+        with self.assertRaisesRegex(ValueError, "comic_style_anchor source"):
+            scene_clusters.build_reference_pack(
+                visual_cluster(), references, stable_pages=stable_pages
+            )
+
+    def test_target_composition_must_be_immutable_matching_target_path(self):
+        stable_pages = [
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        ]
+        mutations = (
+            {"path": "输入/场景/9999.png"},
+            {"source": "generated_candidate"},
+        )
+        for mutation in mutations:
+            references = complete_references()
+            references[0] = {**references[0], **mutation}
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, "target_composition"):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(), references, stable_pages=stable_pages
+                    )
+
+    def test_v4_references_and_stable_pages_require_sha256(self):
+        stable = {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        for index in range(len(complete_references())):
+            references = complete_references()
+            references[index].pop("sha256")
+            with self.subTest(reference_index=index):
+                with self.assertRaisesRegex(ValueError, "sha256"):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(), references, stable_pages=[stable]
+                    )
+
+        stable_without_hash = dict(stable)
+        stable_without_hash.pop("sha256")
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            scene_clusters.build_reference_pack(
+                visual_cluster(), complete_references(), stable_pages=[stable_without_hash]
+            )
+
+    def test_stable_page_hash_change_invalidates_pack_identity_and_binding(self):
+        stable = {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        first = scene_clusters.build_reference_pack(
+            visual_cluster(), complete_references(), stable_pages=[stable]
+        )
+        changed_references = complete_references()
+        changed_references[1] = {**changed_references[1], "sha256": "f" * 64}
+        second = scene_clusters.build_reference_pack(
+            visual_cluster(),
+            changed_references,
+            stable_pages=[{**stable, "sha256": "f" * 64}],
+        )
+        self.assertNotEqual(first["reference_pack_id"], second["reference_pack_id"])
+        self.assertNotEqual(first["reference_binding_hash"], second["reference_binding_hash"])
+
     def test_prop_and_scene_anchors_are_conditional_on_issue_schedule(self):
-        stable_pages = [{"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1")}]
+        stable_pages = [
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        ]
         cases = (("prop continuity", "prop_anchor"), ("scene consistency", "scene_anchor"))
         for issue, required_role in cases:
             with self.subTest(issue=issue):
@@ -378,6 +561,61 @@ class ReferencePackTests(unittest.TestCase):
         )
         self.assertEqual(pack["cluster_id"], "cluster-a")
 
+    def test_metadata_collections_reject_mapping_singletons_and_visual_conflicts(self):
+        with self.assertRaisesRegex(ValueError, "cast.*list"):
+            scene_clusters.build_scene_clusters(
+                [make_page("1", cast={"邓正虎": "present"})], min_size=1
+            )
+        with self.assertRaisesRegex(ValueError, "issue_schedule.*list"):
+            scene_clusters.build_scene_clusters(
+                [make_page("1", issue_schedule={"type": "prop continuity"})],
+                min_size=1,
+            )
+        with self.assertRaisesRegex(ValueError, "visual_tasks.*list"):
+            scene_clusters.build_scene_clusters(
+                [make_page("1", visual_tasks={"page": "redraw"})], min_size=1
+            )
+        with self.assertRaisesRegex(ValueError, "contradicts"):
+            scene_clusters.build_scene_clusters(
+                [
+                    make_page(
+                        "1",
+                        has_visual_task=False,
+                        issue_schedule=[{"type": "prop continuity"}],
+                    )
+                ],
+                min_size=1,
+            )
+
+        with self.assertRaisesRegex(ValueError, "has_visual_tasks.*boolean"):
+            scene_clusters.build_reference_pack(
+                visual_cluster(has_visual_tasks="yes"),
+                complete_references(),
+                stable_pages=[
+                    {
+                        "path": "输入/稳定页/0188.png",
+                        "review": reviewed("style-review-1"),
+                        "sha256": "b" * 64,
+                    }
+                ],
+            )
+
+    def test_mapping_prop_and_scene_issues_require_their_anchors(self):
+        stable_pages = [
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        ]
+        for issue, role in (
+            ({"type": "prop continuity", "subject": "狼毫笔"}, "prop_anchor"),
+            ({"type": "scene consistency", "subject": "飞龙泉"}, "scene_anchor"),
+        ):
+            with self.subTest(issue=issue):
+                with self.assertRaisesRegex(ValueError, role):
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(issue_schedule=[issue]),
+                        complete_references(),
+                        stable_pages=stable_pages,
+                    )
+
     def test_stable_page_requires_review_evidence_not_a_bare_path(self):
         with self.assertRaisesRegex(ValueError, "stable page review evidence"):
             scene_clusters.build_reference_pack(
@@ -387,7 +625,9 @@ class ReferencePackTests(unittest.TestCase):
             )
 
     def test_reference_requires_subject_source_and_valid_review_shape(self):
-        stable_pages = [{"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1")}]
+        stable_pages = [
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        ]
         for field in ("subject", "source"):
             references = complete_references()
             references[0].pop(field)
@@ -416,8 +656,12 @@ class ReferencePackTests(unittest.TestCase):
             {"path": "001.jpg", "role": "adjacent_style", "sha256": "a" * 64},
             {"path": "人物参考图/hero.png", "role": "identity_only", "sha256": "b" * 64},
         ]
-        first = scene_clusters.build_reference_pack(cluster, references)
-        second = scene_clusters.build_reference_pack(cluster, list(reversed(references)))
+        first = scene_clusters.build_reference_pack(
+            cluster, references, contract_version="v3"
+        )
+        second = scene_clusters.build_reference_pack(
+            cluster, list(reversed(references)), contract_version="v3"
+        )
         self.assertEqual(first, second)
         self.assertEqual(
             first["reference_pack_id"],
@@ -429,6 +673,7 @@ class ReferencePackTests(unittest.TestCase):
         changed = scene_clusters.build_reference_pack(
             cluster,
             [{**references[0], "sha256": "c" * 64}, references[1]],
+            contract_version="v3",
         )
         self.assertNotEqual(first["reference_pack_id"], changed["reference_pack_id"])
 
@@ -438,12 +683,12 @@ class ReferencePackTests(unittest.TestCase):
         }
         self.assertTrue(
             scene_clusters.validate_reference_pack(
-                clean, stable_pages=["comic/010.jpg"]
+                clean, stable_pages=["comic/010.jpg"], contract_version="v3"
             )
         )
         with self.assertRaisesRegex(ValueError, "stable page"):
             scene_clusters.validate_reference_pack(
-                clean, stable_pages=["comic/009.jpg"]
+                clean, stable_pages=["comic/009.jpg"], contract_version="v3"
             )
         with self.assertRaisesRegex(ValueError, "contaminated"):
             scene_clusters.validate_reference_pack(
@@ -453,6 +698,7 @@ class ReferencePackTests(unittest.TestCase):
                     ]
                 },
                 stable_pages=["identity_sheet.png"],
+                contract_version="v3",
             )
 
     def test_reference_pack_rejects_empty_unknown_and_malformed_records(self):
@@ -469,7 +715,9 @@ class ReferencePackTests(unittest.TestCase):
 
     def test_bind_reference_pack_is_immutable_idempotent_and_rejects_rebind(self):
         cluster = visual_cluster()
-        stable_pages = [{"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1")}]
+        stable_pages = [
+            {"path": "输入/稳定页/0188.png", "review": reviewed("style-review-1"), "sha256": "b" * 64}
+        ]
         pack = scene_clusters.build_reference_pack(cluster, complete_references(), stable_pages=stable_pages)
         bound = scene_clusters.bind_reference_pack(cluster, pack, stable_pages=stable_pages)
         self.assertNotIn("reference_pack_id", cluster)

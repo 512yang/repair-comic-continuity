@@ -753,7 +753,9 @@ def _validate_scene_cluster_contract(
                 continue
             references = pack.get("references")
             try:
-                validate_reference_pack(pack, stable_pages=stable_pages)
+                validate_reference_pack(
+                    pack, stable_pages=stable_pages, contract_version="v3"
+                )
             except ValueError as exc:
                 errors.append(f"style reference pack {pack_id!r} invalid: {exc}")
             if isinstance(references, list):
@@ -804,6 +806,7 @@ def _validate_scene_cluster_contract(
                         {"cluster_id": cluster_id},
                         canonical_references,
                         stable_pages=stable_pages,
+                        contract_version="v3",
                     )
                 except ValueError:
                     rebuilt = None

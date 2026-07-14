@@ -7,6 +7,7 @@ import ntpath
 import os
 import re
 import unicodedata
+from datetime import datetime
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -157,7 +158,7 @@ def _identity(value: str) -> str:
 def _string_list(value: object, field: str) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, str) or not isinstance(value, Iterable):
+    if not isinstance(value, list):
         raise ValueError(f"{field} must be a list of nonempty strings")
     result: list[str] = []
     seen: set[str] = set()
@@ -188,9 +189,7 @@ def _costume_state(value: object) -> dict[str, str]:
 def _issue_records(value: object) -> list[object]:
     if value is None:
         return []
-    if isinstance(value, str):
-        return [_required_text(value, "issue_schedule")]
-    if not isinstance(value, Iterable):
+    if not isinstance(value, list):
         raise ValueError("issue_schedule must be a list")
     records: list[object] = []
     seen: set[str] = set()
@@ -198,6 +197,8 @@ def _issue_records(value: object) -> list[object]:
         if isinstance(record, str):
             normalized: object = _required_text(record, "issue_schedule")
         elif isinstance(record, Mapping):
+            if any(not isinstance(key, str) for key in record):
+                raise ValueError("issue_schedule mapping keys must be strings")
             normalized = dict(record)
             canonical_hash(normalized)
         else:
@@ -220,6 +221,10 @@ def _semantic_signature(page: Mapping[str, Any]) -> dict[str, object]:
         "costume_state": _costume_state(page.get("costume_state")),
         "explicit_transition": _text_or_unknown(page.get("explicit_transition")),
     }
+
+
+def _semantic_resolved(page: Mapping[str, Any]) -> bool:
+    return all(value != "unknown" for value in scene_key(page))
 
 
 def _validate_sizes(min_size: int, max_size: int, context_radius: int) -> None:
@@ -278,20 +283,19 @@ _VISUAL_TERMS = (
 
 def _page_has_visual_task(page: Mapping[str, Any]) -> bool:
     explicit = page.get("has_visual_task", page.get("has_visual_tasks"))
-    if explicit is not None:
-        if not isinstance(explicit, bool):
-            raise ValueError("has_visual_task must be a boolean")
-        return explicit
+    if explicit is not None and not isinstance(explicit, bool):
+        raise ValueError("has_visual_task must be a boolean")
     visual_tasks = page.get("visual_tasks")
-    if visual_tasks:
-        return True
-    if page.get("page_class") == "full_page_redraw":
-        return True
+    if visual_tasks is not None and not isinstance(visual_tasks, list):
+        raise ValueError("visual_tasks must be a list")
+    inferred = bool(visual_tasks) or page.get("page_class") == "full_page_redraw"
     for issue in _issue_records(page.get("issue_schedule")):
         text = str(issue).casefold()
         if any(term in text for term in _VISUAL_TERMS):
-            return True
-    return False
+            inferred = True
+    if explicit is False and inferred:
+        raise ValueError("has_visual_task=false contradicts visual issue metadata")
+    return bool(explicit) or inferred
 
 
 def _risk_score(page: Mapping[str, Any]) -> float:
@@ -409,7 +413,14 @@ def build_scene_clusters(
     runs: list[list[Mapping[str, Any]]] = []
     signatures: list[str] = []
     for page in ordered_pages:
-        signature = canonical_hash(_semantic_signature(page))
+        signature_payload: dict[str, object] = _semantic_signature(page)
+        if not _semantic_resolved(page):
+            # Unknown primary boundaries cannot prove that adjacent pages share a scene.
+            signature_payload = {
+                **signature_payload,
+                "unresolved_page": _page_reference(page),
+            }
+        signature = canonical_hash(signature_payload)
         if not runs or signature != signatures[-1]:
             runs.append([page])
             signatures.append(signature)
@@ -443,18 +454,53 @@ def build_scene_clusters(
             "cast": cast,
             "persistent_props": persistent_props,
             "costume_state": costume_state,
+            "explicit_transition": _text_or_unknown(
+                chunk[0].get("explicit_transition")
+            ),
         }
         identity_payload = {
             "member_pages": member_pages,
             "scene_fingerprint": canonical_hash(fingerprint_payload),
         }
+        semantic_status = (
+            "resolved"
+            if all(_semantic_resolved(page) for page in chunk)
+            else "unresolved"
+        )
         controls = cluster_size_controls(
             len(ordered_ids),
             len(chunk),
             member_pages == ordered_ids,
             min_size,
-            semantically_bounded=True,
+            semantically_bounded=semantic_status == "resolved",
         )
+        if semantic_status == "unresolved":
+            controls.update(
+                boundary_exception=False,
+                undersized_reason="unresolved_semantic_boundary",
+                short_scene_reason=None,
+                blocked=True,
+                blocker_codes=["UNRESOLVED_SEMANTIC_BOUNDARY"],
+            )
+        boundary_reason = {
+            "start": _boundary_changes(
+                ordered_pages[first_position - 1]
+                if first_position > 0
+                else None,
+                ordered_pages[first_position],
+            ),
+            "end": _boundary_changes(
+                ordered_pages[last_position],
+                ordered_pages[last_position + 1]
+                if last_position + 1 < len(ordered_pages)
+                else None,
+            ),
+        }
+        if semantic_status == "unresolved":
+            boundary_reason = {
+                "start": ["unresolved_semantic_boundary"],
+                "end": ["unresolved_semantic_boundary"],
+            }
         clusters.append(
             {
                 "cluster_id": f"cluster-{canonical_hash(identity_payload)[:16]}",
@@ -466,24 +512,12 @@ def build_scene_clusters(
                     last_position + 1 : last_position + 1 + context_radius
                 ],
                 "scene_key": scene_key(chunk[0]),
+                "semantic_status": semantic_status,
                 "cast": cast,
                 "persistent_props": persistent_props,
                 "costume_state": costume_state,
                 "scene_fingerprint": canonical_hash(fingerprint_payload),
-                "boundary_reason": {
-                    "start": _boundary_changes(
-                        ordered_pages[first_position - 1]
-                        if first_position > 0
-                        else None,
-                        ordered_pages[first_position],
-                    ),
-                    "end": _boundary_changes(
-                        ordered_pages[last_position],
-                        ordered_pages[last_position + 1]
-                        if last_position + 1 < len(ordered_pages)
-                        else None,
-                    ),
-                },
+                "boundary_reason": boundary_reason,
                 "confidence": _confidence(chunk),
                 "has_visual_tasks": bool(visual_targets),
                 "visual_targets": visual_targets,
@@ -534,25 +568,57 @@ def _looks_contaminated(path: str) -> bool:
     return any(marker in compact for marker in markers)
 
 
-def _review_record(value: object, *, required: bool, label: str) -> dict[str, str] | None:
+def _sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
+        raise ValueError(f"{label} sha256 must be 64 hexadecimal characters")
+    return value.lower()
+
+
+def _evidence_path(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} evidence_path must be a relative path")
+    normalized = value.replace("\\", "/").strip()
+    components = normalized.split("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(component in {"", ".", ".."} for component in components)
+    ):
+        raise ValueError(f"{label} evidence_path must be a safe relative path")
+    return normalized
+
+
+def _review_record(
+    value: object, *, required: bool, label: str
+) -> dict[str, object] | None:
     if value is None and not required:
         return None
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} review evidence must be a mapping")
     status = _required_text(value.get("status"), f"{label} review status")
-    evidence_id = _required_text(
-        value.get("evidence_id"), f"{label} review evidence_id"
-    )
-    if status.casefold() not in {"reviewed", "approved"}:
-        if required:
-            if label == "comic_style_anchor":
-                raise ValueError("reviewed comic_style_anchor evidence is required")
-            raise ValueError(f"{label} must have reviewed review evidence")
-    result = {"status": status.casefold(), "evidence_id": evidence_id}
-    reviewer = value.get("reviewer")
-    if reviewer is not None:
-        result["reviewer"] = _required_text(reviewer, f"{label} reviewer")
-    return result
+    if status.casefold() not in {"passed", "approved"}:
+        raise ValueError(f"reviewed {label} status must be passed or approved")
+    if value.get("full_size") is not True:
+        raise ValueError(f"{label} review must be full-size")
+    reviewer = _required_text(value.get("reviewer"), f"{label} reviewer")
+    reviewed_at = _required_text(value.get("reviewed_at"), f"{label} reviewed_at")
+    try:
+        parsed_time = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} reviewed_at must be ISO 8601") from exc
+    if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+        raise ValueError(f"{label} reviewed_at must include timezone")
+    return {
+        "status": status.casefold(),
+        "full_size": True,
+        "reviewer": reviewer,
+        "reviewed_at": reviewed_at,
+        "evidence_path": _evidence_path(value.get("evidence_path"), label),
+        "evidence_sha256": _sha256(
+            value.get("evidence_sha256"), f"{label} evidence"
+        ),
+    }
 
 
 def _stable_page_records(stable_pages: Iterable[object] | None) -> list[dict[str, object]]:
@@ -567,52 +633,103 @@ def _stable_page_records(stable_pages: Iterable[object] | None) -> list[dict[str
         review = _review_record(
             row.get("review"), required=True, label="stable page"
         )
+        digest = _sha256(row.get("sha256"), "stable page")
         marker = _identity(path)
         if marker in seen:
             raise SceneClusterContractError(
                 "DUPLICATE_STABLE_PAGE", "duplicate stable page", path=path
             )
         seen.add(marker)
-        records.append({"path": path, "review": review})
+        records.append({"path": path, "sha256": digest, "review": review})
     return sorted(records, key=lambda row: _identity(str(row["path"])))
 
 
-def _canonical_reference(reference: Mapping[str, Any]) -> dict[str, object]:
-    role = reference.get("role")
-    legacy_identity = (
-        role == "identity_only"
-        and "subject" not in reference
-        and "source" not in reference
-    )
-    if isinstance(role, str) and (
-        role in LEGACY_REFERENCE_ROLES - REFERENCE_ROLES or legacy_identity
+def _validate_contract_version(contract_version: str) -> None:
+    if contract_version not in {"v3", "v4"}:
+        raise ValueError("contract_version must be v3 or v4")
+
+
+def _reference_schema_preflight(
+    references: list[Mapping[str, Any]], contract_version: str
+) -> None:
+    roles = {row.get("role") for row in references}
+    v3_only = roles & (LEGACY_REFERENCE_ROLES - REFERENCE_ROLES)
+    v4_only = roles & (REFERENCE_ROLES - LEGACY_REFERENCE_ROLES)
+    if contract_version == "v4" and v3_only:
+        code = (
+            "MIXED_REFERENCE_SCHEMA"
+            if v4_only or "identity_only" in roles
+            else "LEGACY_ADAPTER_REQUIRED"
+        )
+        raise SceneClusterContractError(
+            code,
+            "V3 and V4 reference records must not be mixed; use the explicit V3 adapter",
+            roles=sorted(str(role) for role in roles),
+        )
+    if contract_version == "v3" and v4_only:
+        raise SceneClusterContractError(
+            "MIXED_REFERENCE_SCHEMA",
+            "V4 reference roles are forbidden in the explicit V3 adapter",
+            roles=sorted(str(role) for role in roles),
+        )
+    if contract_version == "v3" and any(
+        any(field in row for field in ("subject", "source", "review"))
+        for row in references
     ):
+        raise SceneClusterContractError(
+            "MIXED_REFERENCE_SCHEMA",
+            "V4 trace fields are forbidden in the explicit V3 adapter",
+        )
+
+
+def _canonical_reference(
+    reference: Mapping[str, Any], contract_version: str
+) -> dict[str, object]:
+    role = reference.get("role")
+    if contract_version == "v3":
+        if not isinstance(role, str) or role not in LEGACY_REFERENCE_ROLES:
+            raise ValueError(f"unknown V3 reference role: {role!r}")
         canonical_legacy: dict[str, object] = {
             "path": _legacy_reference_path(reference.get("path")),
             "role": role,
         }
         if "sha256" in reference:
-            digest = reference.get("sha256")
-            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
-                raise ValueError("reference sha256 must be 64 hexadecimal characters")
-            canonical_legacy["sha256"] = digest.lower()
+            canonical_legacy["sha256"] = _sha256(
+                reference.get("sha256"), "reference"
+            )
         return canonical_legacy
+
     path = _reference_path(reference.get("path"))
     if not isinstance(role, str) or role not in REFERENCE_ROLES:
-        raise ValueError(f"unknown reference role: {role!r}")
-    subject = _required_text(reference.get("subject"), "subject")
-    source = _required_text(reference.get("source"), "source")
+        raise SceneClusterContractError(
+            "UNKNOWN_REFERENCE_ROLE", f"unknown V4 reference role: {role!r}"
+        )
+    for field in ("subject", "source"):
+        if field not in reference:
+            raise SceneClusterContractError(
+                "MISSING_REFERENCE_FIELD",
+                f"V4 reference is missing {field}",
+                role=role,
+                field=field,
+            )
+    subject = _required_text(reference["subject"], "subject")
+    source = _required_text(reference["source"], "source")
     canonical: dict[str, object] = {
         "path": path,
         "role": role,
         "subject": subject,
         "source": source,
+        "sha256": _sha256(reference.get("sha256"), "reference"),
     }
-    if "sha256" in reference:
-        digest = reference.get("sha256")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
-            raise ValueError("reference sha256 must be 64 hexadecimal characters")
-        canonical["sha256"] = digest.lower()
+    if role == "target_composition" and source != "immutable_input":
+        raise ValueError("target_composition source must be immutable_input")
+    if role == "comic_style_anchor":
+        if source not in {"reviewed_comic_page", "reviewed_comic_identity_anchor"}:
+            raise ValueError(
+                "comic_style_anchor source is not an allowed reviewed comic page"
+            )
+        if _looks_contaminated(_identity(path)):
+            raise ValueError("comic_style_anchor must not use a character sheet")
     review = _review_record(
         reference.get("review"),
         required=role in {"comic_style_anchor", "prop_anchor", "scene_anchor"},
@@ -640,7 +757,10 @@ def _validate_visual_coverage(
     references: list[Mapping[str, Any]],
     stable_pages: list[Mapping[str, object]],
 ) -> None:
-    if not cluster.get("has_visual_tasks"):
+    has_visual_tasks = cluster.get("has_visual_tasks")
+    if not isinstance(has_visual_tasks, bool):
+        raise ValueError("has_visual_tasks must be a boolean")
+    if not has_visual_tasks:
         return
     required_characters = _string_list(cluster.get("cast"), "cast")
     for character in _string_list(cluster.get("repair_characters"), "repair_characters"):
@@ -653,7 +773,8 @@ def _validate_visual_coverage(
         or (
             row["role"] == "comic_style_anchor"
             and row.get("source") == "reviewed_comic_identity_anchor"
-            and "review" in row
+            and row.get("review", {}).get("status") in {"passed", "approved"}
+            and row.get("review", {}).get("full_size") is True
         )
     }
     missing_cast = [
@@ -668,22 +789,35 @@ def _validate_visual_coverage(
         cluster.get("visual_targets") or cluster.get("member_pages"),
         "visual_targets",
     )
-    target_subjects = {
-        _identity(str(row["subject"]))
-        for row in references
-        if row["role"] == "target_composition"
-    }
-    missing_targets = [target for target in targets if _identity(target) not in target_subjects]
-    if missing_targets:
-        raise ValueError(f"target composition coverage missing: {missing_targets}")
+    target_rows = [row for row in references if row["role"] == "target_composition"]
+    for target in targets:
+        target_path = normalize_relative_image_path(target)
+        matches = [
+            row
+            for row in target_rows
+            if _identity(str(row["subject"])) == _identity(target_path)
+        ]
+        if not matches:
+            raise ValueError(f"target composition coverage missing: {target_path}")
+        for row in matches:
+            reference_path = str(row["path"])
+            components = reference_path.split("/")
+            if components and _identity(components[0]) in {"输入", "input"}:
+                reference_path = "/".join(components[1:])
+            if _identity(reference_path) != _identity(target_path):
+                raise ValueError(
+                    f"target_composition path does not match target: {target_path}"
+                )
 
-    stable_paths = {_identity(str(row["path"])) for row in stable_pages}
+    stable_by_path = {
+        _identity(str(row["path"])): str(row["sha256"]) for row in stable_pages
+    }
     reviewed_style = [
         row
         for row in references
         if row["role"] == "comic_style_anchor"
         and "review" in row
-        and _identity(str(row["path"])) in stable_paths
+        and stable_by_path.get(_identity(str(row["path"]))) == row["sha256"]
     ]
     if not reviewed_style:
         raise ValueError("visual pack requires a reviewed comic_style_anchor")
@@ -702,6 +836,8 @@ def validate_reference_pack(
     pack: Mapping[str, Any],
     stable_pages: Iterable[object] | None = None,
     cluster: Mapping[str, Any] | None = None,
+    *,
+    contract_version: str = "v4",
 ) -> bool:
     """Validate roles, traceability, review evidence, and target coverage."""
     if not isinstance(pack, Mapping) or "references" not in pack:
@@ -709,13 +845,14 @@ def validate_reference_pack(
     raw_references = pack["references"]
     if not isinstance(raw_references, list) or not raw_references:
         raise ValueError("references must be a nonempty list")
-    references = [
-        _canonical_reference(row) if isinstance(row, Mapping) else None
-        for row in raw_references
-    ]
-    if any(row is None for row in references):
+    _validate_contract_version(contract_version)
+    if any(not isinstance(row, Mapping) for row in raw_references):
         raise ValueError("every reference must be a mapping")
-    canonical_references = [row for row in references if row is not None]
+    reference_rows = [row for row in raw_references if isinstance(row, Mapping)]
+    _reference_schema_preflight(reference_rows, contract_version)
+    canonical_references = [
+        _canonical_reference(row, contract_version) for row in reference_rows
+    ]
     seen: set[tuple[str, str]] = set()
     for row in canonical_references:
         marker = (_identity(str(row["path"])), str(row["role"]))
@@ -727,11 +864,7 @@ def validate_reference_pack(
                 role=row["role"],
             )
         seen.add(marker)
-    legacy = all(
-        str(row["role"]) in LEGACY_REFERENCE_ROLES and "subject" not in row
-        for row in canonical_references
-    )
-    if legacy:
+    if contract_version == "v3":
         stable_paths = (
             {_legacy_reference_path(path) for path in stable_pages}
             if stable_pages is not None
@@ -755,17 +888,22 @@ def build_reference_pack(
     cluster: Mapping[str, Any],
     references: Iterable[Mapping[str, Any]],
     stable_pages: Iterable[object] | None = None,
+    *,
+    contract_version: str = "v4",
 ) -> dict[str, Any]:
     """Return a deterministic, cast-complete reference pack for one cluster."""
     if not isinstance(cluster, Mapping) or not cluster.get("cluster_id"):
         raise ValueError("cluster must contain cluster_id")
     cluster_id = str(cluster["cluster_id"])
+    _validate_contract_version(contract_version)
     raw_references = list(references)
+    if any(not isinstance(reference, Mapping) for reference in raw_references):
+        raise ValueError("every reference must be a mapping")
+    reference_rows = [row for row in raw_references if isinstance(row, Mapping)]
+    _reference_schema_preflight(reference_rows, contract_version)
     canonical_references = [
-        _canonical_reference(reference)
-        if isinstance(reference, Mapping)
-        else (_ for _ in ()).throw(ValueError("every reference must be a mapping"))
-        for reference in raw_references
+        _canonical_reference(reference, contract_version)
+        for reference in reference_rows
     ]
     canonical_references.sort(
         key=lambda item: (
@@ -774,11 +912,7 @@ def build_reference_pack(
             _identity(str(item.get("subject", ""))),
         )
     )
-    legacy = bool(canonical_references) and all(
-        str(row["role"]) in LEGACY_REFERENCE_ROLES and "subject" not in row
-        for row in canonical_references
-    )
-    if legacy:
+    if contract_version == "v3":
         reference_pack_id = canonical_hash(
             {"cluster_id": cluster_id, "references": canonical_references}
         )
@@ -787,7 +921,9 @@ def build_reference_pack(
             "cluster_id": cluster_id,
             "references": canonical_references,
         }
-        validate_reference_pack(pack, stable_pages=stable_pages)
+        validate_reference_pack(
+            pack, stable_pages=stable_pages, contract_version="v3"
+        )
         pack["reference_binding_hash"] = canonical_hash(
             {
                 "reference_pack_id": reference_pack_id,
@@ -797,7 +933,11 @@ def build_reference_pack(
         return pack
     stable_records = _stable_page_records(stable_pages)
     reference_pack_id = canonical_hash(
-        {"cluster_id": cluster_id, "references": canonical_references}
+        {
+            "cluster_id": cluster_id,
+            "references": canonical_references,
+            "stable_pages": stable_records,
+        }
     )
     pack: dict[str, Any] = {
         "reference_pack_id": reference_pack_id,
@@ -805,7 +945,12 @@ def build_reference_pack(
         "references": canonical_references,
         "stable_pages": stable_records,
     }
-    validate_reference_pack(pack, stable_pages=stable_records, cluster=cluster)
+    validate_reference_pack(
+        pack,
+        stable_pages=stable_records,
+        cluster=cluster,
+        contract_version="v4",
+    )
     pack["reference_binding_hash"] = canonical_hash(
         {
             "reference_pack_id": reference_pack_id,
@@ -820,6 +965,8 @@ def bind_reference_pack(
     cluster: Mapping[str, Any],
     pack: Mapping[str, Any],
     stable_pages: Iterable[object] | None = None,
+    *,
+    contract_version: str = "v4",
 ) -> dict[str, Any]:
     """Bind an intact pack; reject unaudited replacement of an existing pack."""
     if not isinstance(cluster, Mapping) or not cluster.get("cluster_id"):
@@ -829,13 +976,8 @@ def bind_reference_pack(
     references = pack.get("references")
     if not isinstance(references, list):
         raise ValueError("reference pack must contain references")
-    legacy = bool(references) and all(
-        isinstance(row, Mapping)
-        and row.get("role") in LEGACY_REFERENCE_ROLES
-        and "subject" not in row
-        for row in references
-    )
-    if legacy:
+    _validate_contract_version(contract_version)
+    if contract_version == "v3":
         stable = stable_pages
         if stable is None:
             stable = [
@@ -845,7 +987,12 @@ def bind_reference_pack(
             ]
     else:
         stable = stable_pages if stable_pages is not None else pack.get("stable_pages", [])
-    rebuilt = build_reference_pack(cluster, references, stable_pages=stable)
+    rebuilt = build_reference_pack(
+        cluster,
+        references,
+        stable_pages=stable,
+        contract_version=contract_version,
+    )
     if (
         pack.get("reference_pack_id") != rebuilt["reference_pack_id"]
         or pack.get("reference_binding_hash") != rebuilt["reference_binding_hash"]

@@ -248,8 +248,11 @@ class ComicContinuityToolsTests(unittest.TestCase):
                     }
                 ],
                 stable_pages=[],
+                contract_version="v3",
             )
-            cluster = bind_reference_pack(cluster_blueprint, pack)
+            cluster = bind_reference_pack(
+                cluster_blueprint, pack, contract_version="v3"
+            )
             clusters.append(cluster)
             reference_packs.append(pack)
             for output_name in members:
@@ -1101,6 +1104,7 @@ class ComicContinuityToolsTests(unittest.TestCase):
                     }
                 ],
                 stable_pages=[stable_path],
+                contract_version="v3",
             )
 
         pack_document = self.rewrite_registry(

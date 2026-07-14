@@ -254,6 +254,7 @@ def _normalize_references(
     validate_reference_pack(
         {"references": references},
         stable_pages=stable_pages,
+        contract_version="v3",
     )
     return references, stable_pages
 
