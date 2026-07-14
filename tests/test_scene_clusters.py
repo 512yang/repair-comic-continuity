@@ -443,6 +443,154 @@ class ReferencePackTests(unittest.TestCase):
         )
         self.assertEqual(pack["cluster_id"], "cluster-a")
 
+    def test_generic_prop_and_scene_issues_reject_arbitrary_anchors_without_fallback(self):
+        stable_pages = [
+            {
+                "path": complete_references()[1]["path"],
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        cases = (
+            (
+                visual_cluster(issue_schedule=["prop continuity"]),
+                {
+                    "path": "input/arbitrary-prop.png",
+                    "role": "prop_anchor",
+                    "subject": "arbitrary prop",
+                    "source": "reviewed_prop_appearance",
+                    "review": reviewed("prop-review"),
+                    "sha256": "f" * 64,
+                },
+                "UNRESOLVED_PROP_ISSUE_SUBJECT",
+            ),
+            (
+                visual_cluster(issue_schedule=["scene consistency"]),
+                {
+                    "path": "input/arbitrary-scene.png",
+                    "role": "scene_anchor",
+                    "subject": "arbitrary scene",
+                    "source": "reviewed_scene_appearance",
+                    "review": reviewed("scene-review"),
+                    "sha256": "f" * 64,
+                },
+                "UNRESOLVED_SCENE_ISSUE_SUBJECT",
+            ),
+        )
+        for cluster, anchor, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+                    scene_clusters.build_reference_pack(
+                        cluster,
+                        complete_references() + [anchor],
+                        stable_pages=stable_pages,
+                    )
+                self.assertEqual(raised.exception.code, expected_code)
+
+    def test_mapping_issue_subject_must_be_a_nonempty_string(self):
+        stable_pages = [
+            {
+                "path": complete_references()[1]["path"],
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        anchor = {
+            "path": "input/arbitrary-prop.png",
+            "role": "prop_anchor",
+            "subject": "arbitrary prop",
+            "source": "reviewed_prop_appearance",
+            "review": reviewed("prop-review"),
+            "sha256": "f" * 64,
+        }
+        for subject in (123, None, "   "):
+            with self.subTest(subject=subject):
+                with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+                    scene_clusters.build_reference_pack(
+                        visual_cluster(
+                            issue_schedule=[
+                                {"type": "prop continuity", "subject": subject}
+                            ]
+                        ),
+                        complete_references() + [anchor],
+                        stable_pages=stable_pages,
+                    )
+                self.assertEqual(raised.exception.code, "INVALID_ISSUE_SUBJECT")
+
+    def test_invalid_issue_subject_is_rejected_before_anchor_coverage(self):
+        stable_pages = [
+            {
+                "path": complete_references()[1]["path"],
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+            scene_clusters.build_reference_pack(
+                visual_cluster(
+                    issue_schedule=[
+                        {"type": "scene consistency", "subject": None}
+                    ]
+                ),
+                complete_references(),
+                stable_pages=stable_pages,
+            )
+        self.assertEqual(raised.exception.code, "INVALID_ISSUE_SUBJECT")
+
+    def test_generic_issue_is_not_suppressed_by_an_explicit_issue_without_fallback(self):
+        stable_pages = [
+            {
+                "path": complete_references()[1]["path"],
+                "review": reviewed("style-review-1"),
+                "sha256": "b" * 64,
+            }
+        ]
+        cases = (
+            (
+                visual_cluster(
+                    issue_schedule=[
+                        {"type": "prop continuity", "subject": "brush"},
+                        "prop continuity",
+                    ]
+                ),
+                {
+                    "path": "input/brush.png",
+                    "role": "prop_anchor",
+                    "subject": "brush",
+                    "source": "reviewed_prop_appearance",
+                    "review": reviewed("prop-review"),
+                    "sha256": "f" * 64,
+                },
+                "UNRESOLVED_PROP_ISSUE_SUBJECT",
+            ),
+            (
+                visual_cluster(
+                    issue_schedule=[
+                        {"type": "scene consistency", "subject": "courtyard"},
+                        "scene consistency",
+                    ]
+                ),
+                {
+                    "path": "input/courtyard.png",
+                    "role": "scene_anchor",
+                    "subject": "courtyard",
+                    "source": "reviewed_scene_appearance",
+                    "review": reviewed("scene-review"),
+                    "sha256": "f" * 64,
+                },
+                "UNRESOLVED_SCENE_ISSUE_SUBJECT",
+            ),
+        )
+        for cluster, anchor, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(scene_clusters.SceneClusterContractError) as raised:
+                    scene_clusters.build_reference_pack(
+                        cluster,
+                        complete_references() + [anchor],
+                        stable_pages=stable_pages,
+                    )
+                self.assertEqual(raised.exception.code, expected_code)
+
     def test_visual_cluster_requires_nonempty_canary_member(self):
         stable_pages = [
             {

@@ -810,6 +810,53 @@ def _requires_issue_anchor(cluster: Mapping[str, Any], kind: str) -> bool:
     return any(any(term in issue for term in terms) for issue in _issue_texts(cluster))
 
 
+def _required_issue_subjects(
+    cluster: Mapping[str, Any], kind: str
+) -> set[str]:
+    terms = {
+        "prop": ("prop", "道具"),
+        "scene": ("scene", "location", "场景", "地点"),
+    }[kind]
+    fallback: list[str] = []
+    if kind == "prop":
+        fallback = _string_list(cluster.get("persistent_props"), "persistent_props")
+    else:
+        key = cluster.get("scene_key")
+        if (
+            isinstance(key, (list, tuple))
+            and len(key) >= 2
+            and isinstance(key[1], str)
+            and key[1].strip()
+            and _identity(key[1]) != "unknown"
+        ):
+            fallback = [key[1].strip()]
+
+    subjects: set[str] = set()
+    for issue in _issue_records(cluster.get("issue_schedule")):
+        if not any(term in str(issue).casefold() for term in terms):
+            continue
+        if isinstance(issue, Mapping) and "subject" in issue:
+            subject = issue["subject"]
+            if not isinstance(subject, str) or not subject.strip():
+                raise SceneClusterContractError(
+                    "INVALID_ISSUE_SUBJECT",
+                    f"{kind}_anchor issue subject must be a nonempty string",
+                    kind=kind,
+                    subject=subject,
+                )
+            subjects.add(_identity(subject))
+            continue
+        if not fallback:
+            code = f"UNRESOLVED_{kind.upper()}_ISSUE_SUBJECT"
+            raise SceneClusterContractError(
+                code,
+                f"{kind}_anchor scheduled issue has no canonical fallback subject",
+                kind=kind,
+            )
+        subjects.update(_identity(value) for value in fallback)
+    return subjects
+
+
 def _validate_visual_coverage(
     cluster: Mapping[str, Any],
     references: list[Mapping[str, Any]],
@@ -905,6 +952,10 @@ def _validate_visual_coverage(
 
     prop_required = _requires_issue_anchor(cluster, "prop")
     scene_required = _requires_issue_anchor(cluster, "scene")
+    prop_subjects = _required_issue_subjects(cluster, "prop") if prop_required else set()
+    scene_subjects = (
+        _required_issue_subjects(cluster, "scene") if scene_required else set()
+    )
     prop_rows = [row for row in references if row["role"] == "prop_anchor"]
     scene_rows = [row for row in references if row["role"] == "scene_anchor"]
     if prop_rows and not prop_required:
@@ -916,28 +967,6 @@ def _validate_visual_coverage(
     if scene_required and not scene_rows:
         raise ValueError("scene_anchor required by issue schedule")
 
-    issue_records = _issue_records(cluster.get("issue_schedule"))
-    prop_subjects: set[str] = set()
-    scene_subjects: set[str] = set()
-    for issue in issue_records:
-        if not isinstance(issue, Mapping) or not isinstance(issue.get("subject"), str):
-            continue
-        text = str(issue).casefold()
-        if any(term in text for term in ("prop", "道具")):
-            prop_subjects.add(_identity(issue["subject"]))
-        if any(term in text for term in ("scene", "location", "场景", "地点")):
-            scene_subjects.add(_identity(issue["subject"]))
-    if prop_required and not prop_subjects:
-        prop_subjects.update(
-            _identity(value)
-            for value in _string_list(
-                cluster.get("persistent_props"), "persistent_props"
-            )
-        )
-    if scene_required and not scene_subjects:
-        key = cluster.get("scene_key")
-        if isinstance(key, (list, tuple)) and len(key) >= 2 and key[1] != "unknown":
-            scene_subjects.add(_identity(str(key[1])))
     prop_row_subjects = {
         _identity(str(row["subject"])) for row in prop_rows
     }
