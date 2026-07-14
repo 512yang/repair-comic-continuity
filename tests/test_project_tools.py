@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import shutil
@@ -76,6 +77,7 @@ class ComicContinuityToolsTests(unittest.TestCase):
 
     def add_page(self, name, color="white"):
         path = self.root / "输入" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (32, 48), color).save(path)
         return path
 
@@ -482,19 +484,54 @@ class ComicContinuityToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate page identity"):
             sorted_input_pages(self.root / "输入")
 
-    def test_input_inventory_accepts_jpg_and_jpeg_only(self):
+    def test_input_inventory_accepts_supported_extensions_recursively(self):
         self.add_page("1.jpg")
         self.add_page("2.jpeg")
+        self.add_page("chapter/3.png")
+        self.add_page("chapter/4.webp")
         self.assertEqual(
-            ["1.jpg", "2.jpeg"],
-            [path.name for path in sorted_input_pages(self.root / "输入")],
+            ["1.jpg", "2.jpeg", "chapter/3.png", "chapter/4.webp"],
+            [
+                path.relative_to(self.root / "输入").as_posix()
+                for path in sorted_input_pages(self.root / "输入")
+            ],
         )
 
-    def test_input_inventory_rejects_png_as_unexpected_instead_of_counting_it(self):
-        self.add_page("1.jpg")
-        self.add_page("2.png")
-        with self.assertRaisesRegex(ValueError, r"unexpected input image.*\.jpg.*\.jpeg"):
-            sorted_input_pages(self.root / "输入")
+    def test_inventory_records_exact_relative_path_extension_dimensions_and_hash(self):
+        page = self.add_page("章节一/252（1）.png")
+
+        inventory = inventory_project(self.root, expected_count=1)
+
+        self.assertEqual(
+            {
+                "index": 1,
+                "input_name": "章节一/252（1）.png",
+                "relative_path": "章节一/252（1）.png",
+                "extension": ".png",
+                "width": 32,
+                "height": 48,
+                "input_sha256": sha256_file(page),
+            },
+            inventory["pages"][0],
+        )
+
+    def test_inventory_records_hash_bound_novel_decoding_without_mutation(self):
+        novel = self.root / "小说.txt"
+        text = "国标小说正文"
+        raw = text.encode("gb18030")
+        novel.write_bytes(raw)
+
+        inventory = inventory_project(self.root)
+
+        self.assertEqual(raw, novel.read_bytes())
+        self.assertEqual("gb18030", inventory["novel"]["encoding"])
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(), inventory["novel"]["raw_sha256"]
+        )
+        self.assertEqual(
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            inventory["novel"]["decoded_sha256"],
+        )
 
     def test_discovery_finds_fixed_project_resources(self):
         self.add_page("189.jpg")

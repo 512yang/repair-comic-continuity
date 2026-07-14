@@ -14,7 +14,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 
-INPUT_PAGE_EXTENSIONS = frozenset({".jpg", ".jpeg"})
+INPUT_PAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 REFERENCE_IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 )
@@ -48,8 +48,7 @@ def page_identity(path: Path) -> tuple[Any, ...]:
     return ("named", collapsed)
 
 
-def natural_page_key(path: Path) -> tuple[Any, ...]:
-    """Sort numeric comic pages and their parenthesized inserts naturally."""
+def _natural_filename_key(path: Path) -> tuple[Any, ...]:
     stem = _normalized_stem(path)
     match = _PAGE_PATTERN.fullmatch(stem)
     if match:
@@ -61,6 +60,23 @@ def natural_page_key(path: Path) -> tuple[Any, ...]:
         if token
     )
     return (1, tokens, path.suffix.casefold(), path.name.casefold())
+
+
+def _natural_component_key(value: str) -> tuple[Any, ...]:
+    return tuple(
+        (0, int(token)) if token.isdigit() else (1, token.casefold())
+        for token in _DIGIT_PATTERN.split(value)
+        if token
+    )
+
+
+def natural_page_key(path: Path) -> tuple[Any, ...]:
+    """Natural-sort a relative page path by story directories, then page name."""
+    path = Path(path)
+    return (
+        tuple(_natural_component_key(part) for part in path.parts[:-1]),
+        _natural_filename_key(path),
+    )
 
 
 def verify_readable_image(path: Path) -> None:
@@ -78,8 +94,8 @@ def sorted_input_pages(input_dir: Path) -> list[Path]:
     if not input_dir.is_dir():
         raise ValueError(f"input directory missing: {input_dir}")
     unexpected_images = sorted(
-        path.name
-        for path in input_dir.iterdir()
+        path.relative_to(input_dir).as_posix()
+        for path in input_dir.rglob("*")
         if path.is_file()
         and path.suffix.casefold() in REFERENCE_IMAGE_EXTENSIONS
         and path.suffix.casefold() not in INPUT_PAGE_EXTENSIONS
@@ -87,23 +103,35 @@ def sorted_input_pages(input_dir: Path) -> list[Path]:
     if unexpected_images:
         raise ValueError(
             "unexpected input image extension; comic input pages must use only "
-            f".jpg or .jpeg: {', '.join(unexpected_images)}"
+            f".jpg, .jpeg, .png, or .webp: {', '.join(unexpected_images)}"
         )
     pages = [
         path
-        for path in input_dir.iterdir()
+        for path in input_dir.rglob("*")
         if path.is_file() and path.suffix.casefold() in INPUT_PAGE_EXTENSIONS
     ]
-    identities: dict[tuple[Any, ...], Path] = {}
+    relative_paths: dict[str, Path] = {}
+    identities: dict[tuple[str, tuple[Any, ...]], Path] = {}
     for page in pages:
         verify_readable_image(page)
-        identity = page_identity(page)
+        relative = page.relative_to(input_dir)
+        relative_key = relative.as_posix().casefold()
+        if relative_key in relative_paths:
+            raise ValueError(
+                "duplicate case-insensitive relative path: "
+                f"{relative_paths[relative_key].relative_to(input_dir).as_posix()!r} "
+                f"and {relative.as_posix()!r}"
+            )
+        relative_paths[relative_key] = page
+        identity = (relative.parent.as_posix().casefold(), page_identity(page))
         if identity in identities:
             raise ValueError(
-                f"duplicate page identity: {identities[identity].name!r} and {page.name!r}"
+                "duplicate page identity: "
+                f"{identities[identity].relative_to(input_dir).as_posix()!r} "
+                f"and {relative.as_posix()!r}"
             )
         identities[identity] = page
-    return sorted(pages, key=natural_page_key)
+    return sorted(pages, key=lambda page: natural_page_key(page.relative_to(input_dir)))
 
 
 def inventory_reference_images(reference_dir: Path) -> list[dict[str, str]]:

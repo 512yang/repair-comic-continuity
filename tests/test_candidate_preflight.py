@@ -461,8 +461,8 @@ class CandidatePreflightTests(unittest.TestCase):
     def test_candidate_batch_reuses_strict_bijection_and_report_order(self):
         module = candidate_preflight()
         original_two = draw_pattern(self.root / "original-two.jpg")
-        candidate_one = draw_pattern(self.root / "0001.jpg")
-        candidate_two = draw_pattern(self.root / "0002.jpg")
+        candidate_one = draw_pattern(self.root / "1.jpg")
+        candidate_two = draw_pattern(self.root / "2.jpg")
         report_one = module.run_candidate_preflight(
             candidate_one, self.original, ocr_metadata=VALID_OCR
         )
@@ -471,8 +471,8 @@ class CandidatePreflightTests(unittest.TestCase):
         )
         inputs = ["1.jpg", "2.jpg"]
         mappings = [
-            {"source_page": "1", "output_name": "0001.jpg"},
-            {"source_page": "2", "output_name": "0002.jpg"},
+            {"source_page": "1.jpg", "output_name": "1.jpg"},
+            {"source_page": "2.jpg", "output_name": "2.jpg"},
         ]
 
         self.assertTrue(
@@ -480,14 +480,14 @@ class CandidatePreflightTests(unittest.TestCase):
                 inputs,
                 mappings,
                 [report_one, report_two],
-                actual_outputs=["0001.jpg", "0002.jpg"],
+                actual_outputs=["1.jpg", "2.jpg"],
             )
         )
         invalid_batches = (
-            (mappings, [report_two, report_one], ["0001.jpg", "0002.jpg"]),
-            (list(reversed(mappings)), [report_one, report_two], ["0001.jpg", "0002.jpg"]),
-            (mappings, [report_one], ["0001.jpg", "0002.jpg"]),
-            (mappings, [report_one, report_two], ["0001.jpg"]),
+            (mappings, [report_two, report_one], ["1.jpg", "2.jpg"]),
+            (list(reversed(mappings)), [report_one, report_two], ["1.jpg", "2.jpg"]),
+            (mappings, [report_one], ["1.jpg", "2.jpg"]),
+            (mappings, [report_one, report_two], ["1.jpg"]),
         )
         for bad_mappings, reports, actual in invalid_batches:
             with self.subTest(mappings=bad_mappings, reports=len(reports), actual=actual):

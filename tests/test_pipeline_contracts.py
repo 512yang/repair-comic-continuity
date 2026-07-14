@@ -10,9 +10,11 @@ from pipeline_contracts import (  # noqa: E402
     ALIGNMENT_STATES,
     PAGE_CLASSES,
     REVIEW_STATES,
+    REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3,
     TASK_STATES,
     canonical_hash,
     make_output_names,
+    normalize_relative_image_path,
     normalize_page_id,
     validate_bijection,
 )
@@ -53,17 +55,30 @@ class PipelineContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "non-finite"):
                     canonical_hash({"value": value})
 
-    def test_make_output_names_returns_contiguous_four_digit_jpg_names(self):
+    def test_make_output_names_preserves_exact_relative_paths_and_extensions(self):
         self.assertEqual(
-            make_output_names(3),
-            ["0001.jpg", "0002.jpg", "0003.jpg"],
+            make_output_names(["252（1）.jpg", r"chapter\2.webp", "彩页/03.PNG"]),
+            ["252（1）.jpg", "chapter/2.webp", "彩页/03.PNG"],
         )
 
-    def test_make_output_names_requires_a_positive_integer(self):
-        for invalid_count in (0, -1, 1.5, True):
-            with self.subTest(invalid_count=invalid_count):
-                with self.assertRaisesRegex(ValueError, "positive integer"):
-                    make_output_names(invalid_count)
+    def test_make_output_names_keeps_deprecated_int_seam_until_task_3(self):
+        self.assertTrue(REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3)
+        self.assertEqual(make_output_names(3), ["0001.jpg", "0002.jpg", "0003.jpg"])
+
+    def test_normalize_relative_image_path_rejects_unsafe_or_unsupported_paths(self):
+        invalid = (
+            "",
+            "/absolute.jpg",
+            r"C:\absolute.jpg",
+            "../escape.jpg",
+            "a//b.jpg",
+            "a/./b.jpg",
+            "page.gif",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "relative image path"):
+                    normalize_relative_image_path(value)
 
     def test_validate_bijection_rejects_a_missing_source_mapping(self):
         inputs = ["252.jpg", "253.jpg"]
@@ -84,25 +99,32 @@ class PipelineContractTests(unittest.TestCase):
 
     def test_validate_bijection_accepts_the_exact_contract(self):
         mappings = [
-            {"source_page": "252.jpg", "output_name": "0001.jpg"},
-            {"source_page": "252（1）.jpg", "output_name": "0002.jpg"},
+            {"source_page": "252（1）.jpg", "output_name": "252（1）.jpg"},
+            {"source_page": r"chapter\253.webp", "output_name": "chapter/253.webp"},
         ]
 
         self.assertIsNone(
             validate_bijection(
-                ["252.jpg", "252（1）.jpg"],
+                ["252（1）.jpg", "chapter/253.webp"],
                 mappings,
-                actual_outputs=["0002.jpg", "0001.jpg"],
+                actual_outputs=["chapter/253.webp", "252（1）.jpg"],
             )
         )
+
+    def test_validate_bijection_rejects_renamed_output(self):
+        with self.assertRaisesRegex(ValueError, "output name must equal source"):
+            validate_bijection(
+                ["252（1）.jpg"],
+                [{"source_page": "252（1）.jpg", "output_name": "0001.jpg"}],
+            )
 
     def test_validate_bijection_rejects_duplicate_normalized_inputs(self):
         with self.assertRaisesRegex(ValueError, "duplicate input"):
             validate_bijection(
-                ["252（1）.jpg", "252(1).png"],
+                ["Page.jpg", "page.JPG"],
                 [
-                    {"source_page": "252（1）.jpg", "output_name": "0001.jpg"},
-                    {"source_page": "252(1).png", "output_name": "0002.jpg"},
+                    {"source_page": "Page.jpg", "output_name": "Page.jpg"},
+                    {"source_page": "page.JPG", "output_name": "page.JPG"},
                 ],
             )
 
@@ -137,7 +159,7 @@ class PipelineContractTests(unittest.TestCase):
             )
 
     def test_validate_bijection_rejects_nonexact_output_names(self):
-        with self.assertRaisesRegex(ValueError, "output names"):
+        with self.assertRaisesRegex(ValueError, "output name must equal source"):
             validate_bijection(
                 ["252.jpg", "253.jpg"],
                 [
@@ -161,10 +183,10 @@ class PipelineContractTests(unittest.TestCase):
             validate_bijection(
                 ["252.jpg", "253.jpg"],
                 [
-                    {"source_page": "252.jpg", "output_name": "0001.jpg"},
-                    {"source_page": "253.jpg", "output_name": "0002.jpg"},
+                    {"source_page": "252.jpg", "output_name": "252.jpg"},
+                    {"source_page": "253.jpg", "output_name": "253.jpg"},
                 ],
-                actual_outputs=["0001.jpg", "unexpected.jpg"],
+                actual_outputs=["252.jpg", "unexpected.jpg"],
             )
 
     def test_validate_bijection_rejects_extra_canonical_actual_output(self):
@@ -172,10 +194,10 @@ class PipelineContractTests(unittest.TestCase):
             validate_bijection(
                 ["252.jpg", "253.jpg"],
                 [
-                    {"source_page": "252.jpg", "output_name": "0001.jpg"},
-                    {"source_page": "253.jpg", "output_name": "0002.jpg"},
+                    {"source_page": "252.jpg", "output_name": "252.jpg"},
+                    {"source_page": "253.jpg", "output_name": "253.jpg"},
                 ],
-                actual_outputs=["0001.jpg", "0002.jpg", "0003.jpg"],
+                actual_outputs=["252.jpg", "253.jpg", "254.jpg"],
             )
 
     def test_validate_bijection_rejects_missing_canonical_actual_output(self):
@@ -183,10 +205,10 @@ class PipelineContractTests(unittest.TestCase):
             validate_bijection(
                 ["252.jpg", "253.jpg"],
                 [
-                    {"source_page": "252.jpg", "output_name": "0001.jpg"},
-                    {"source_page": "253.jpg", "output_name": "0002.jpg"},
+                    {"source_page": "252.jpg", "output_name": "252.jpg"},
+                    {"source_page": "253.jpg", "output_name": "253.jpg"},
                 ],
-                actual_outputs=["0001.jpg"],
+                actual_outputs=["252.jpg"],
             )
 
     def test_validate_bijection_rejects_non_string_actual_outputs_as_value_error(self):
@@ -194,10 +216,10 @@ class PipelineContractTests(unittest.TestCase):
             validate_bijection(
                 ["252.jpg", "253.jpg"],
                 [
-                    {"source_page": "252.jpg", "output_name": "0001.jpg"},
-                    {"source_page": "253.jpg", "output_name": "0002.jpg"},
+                    {"source_page": "252.jpg", "output_name": "252.jpg"},
+                    {"source_page": "253.jpg", "output_name": "253.jpg"},
                 ],
-                actual_outputs=["0001.jpg", 2],
+                actual_outputs=["252.jpg", 2],
             )
 
     def test_contract_state_sets_match_the_canonical_values_exactly(self):

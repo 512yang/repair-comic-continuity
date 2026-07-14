@@ -21,6 +21,10 @@ REVIEW_STATES = frozenset(
 )
 
 _PAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9]+(?:\([0-9]+\))?\Z")
+_INPUT_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+# Task 3 must remove the integer overload and this marker when manifest
+# initialization supplies source-relative paths directly.
+REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3 = True
 
 
 def normalize_page_id(value: object) -> str:
@@ -55,11 +59,47 @@ def canonical_hash(obj: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def make_output_names(count: int) -> list[str]:
-    """Return the exact contiguous four-digit JPG output names."""
-    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
-        raise ValueError("count must be a positive integer")
-    return [f"{index:04d}.jpg" for index in range(1, count + 1)]
+def normalize_relative_image_path(value: object) -> str:
+    """Normalize separators while preserving a safe relative image filename."""
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError("relative image path must be a string or path-like value")
+    path_value = os.fspath(value)
+    if not isinstance(path_value, str):
+        raise ValueError("relative image path must be a string or path-like value")
+    normalized = path_value.replace("\\", "/")
+    components = normalized.split("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(component in {"", ".", ".."} for component in components)
+    ):
+        raise ValueError(f"invalid relative image path: {value!r}")
+    suffix = PurePath(components[-1]).suffix
+    if suffix.casefold() not in _INPUT_IMAGE_EXTENSIONS:
+        raise ValueError(f"invalid relative image path extension: {value!r}")
+    return "/".join(components)
+
+
+def make_output_names(inputs: Iterable[object] | int) -> list[str]:
+    """Return exact source-relative output names.
+
+    The integer overload is a temporary Task 2 compatibility seam for manifest
+    initialization and must be removed when Task 3 supplies source paths.
+    """
+    if isinstance(inputs, int) and not isinstance(inputs, bool):
+        if inputs <= 0:
+            raise ValueError("count must be a positive integer")
+        return [f"{index:04d}.jpg" for index in range(1, inputs + 1)]
+    if isinstance(inputs, (str, bytes, os.PathLike)):
+        raise ValueError("inputs must be a non-empty iterable of relative image paths")
+    try:
+        names = [normalize_relative_image_path(value) for value in inputs]
+    except TypeError as exc:
+        raise ValueError("inputs must be a non-empty iterable of relative image paths") from exc
+    if not names:
+        raise ValueError("inputs must not be empty")
+    return names
 
 
 def validate_bijection(
@@ -68,11 +108,11 @@ def validate_bijection(
     actual_outputs: Iterable[str] | None = None,
 ) -> None:
     """Validate the one-to-one source/output mapping contract."""
-    normalized_inputs = [normalize_page_id(value) for value in inputs]
+    normalized_inputs = [normalize_relative_image_path(value) for value in inputs]
     if not normalized_inputs:
         raise ValueError("inputs must not be empty")
-    if len(set(normalized_inputs)) != len(normalized_inputs):
-        raise ValueError("duplicate input page id")
+    if len({value.casefold() for value in normalized_inputs}) != len(normalized_inputs):
+        raise ValueError("duplicate input relative path")
 
     mapping_rows = list(mappings)
     mapped_sources: list[str] = []
@@ -88,10 +128,10 @@ def validate_bijection(
             raise ValueError(f"missing output_name in mapping at index {index}")
         if not isinstance(output_value, str):
             raise ValueError(f"invalid output_name in mapping at index {index}")
-        mapped_sources.append(normalize_page_id(source_value))
-        output_names.append(output_value)
+        mapped_sources.append(normalize_relative_image_path(source_value))
+        output_names.append(normalize_relative_image_path(output_value))
 
-    if len(set(mapped_sources)) != len(mapped_sources):
+    if len({value.casefold() for value in mapped_sources}) != len(mapped_sources):
         raise ValueError("duplicate source mapping")
     for source in normalized_inputs:
         if source not in mapped_sources:
@@ -110,27 +150,24 @@ def validate_bijection(
                 f"{index}: expected {expected_source!r}, got {source!r}"
             )
 
-    expected_outputs = make_output_names(len(normalized_inputs))
-    if len(set(output_names)) != len(output_names):
+    expected_outputs = make_output_names(normalized_inputs)
+    if len({value.casefold() for value in output_names}) != len(output_names):
         raise ValueError("duplicate output name")
-    if output_names != expected_outputs:
-        raise ValueError(
-            f"output names not exact: expected {expected_outputs!r}, got {output_names!r}"
-        )
+    for index, (source, output) in enumerate(zip(normalized_inputs, output_names)):
+        if output != source:
+            raise ValueError(
+                "output name must equal source relative path at index "
+                f"{index}: expected {source!r}, got {output!r}"
+            )
 
     if actual_outputs is not None:
         actual_output_list = list(actual_outputs)
-        invalid_actual_outputs = [
-            value
-            for value in actual_output_list
-            if not isinstance(value, str)
-            or re.fullmatch(r"[0-9]{4}\.jpg", value) is None
-        ]
-        if invalid_actual_outputs:
-            raise ValueError(
-                "actual outputs contain invalid filename: "
-                f"{invalid_actual_outputs!r}"
-            )
+        try:
+            actual_output_list = [
+                normalize_relative_image_path(value) for value in actual_output_list
+            ]
+        except ValueError as exc:
+            raise ValueError(f"actual outputs contain invalid filename: {exc}") from exc
         expected_output_set = set(expected_outputs)
         actual_output_set = set(actual_output_list)
         extra_outputs = sorted(actual_output_set - expected_output_set)
