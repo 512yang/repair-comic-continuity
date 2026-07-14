@@ -792,13 +792,16 @@ def _derive_migration_gate(
         {"code": "BUNDLE_VALIDATION_ERROR", "detail": error}
         for error in bundle_errors
     )
-    expected_outputs = make_output_names(len(run_pages)) if isinstance(run_pages, list) and run_pages else []
     mapped_outputs = [
         page.get("output_name") for page in run_pages if isinstance(page, Mapping)
     ] if isinstance(run_pages, list) else []
     mapped_inputs = [
         page.get("input_name") for page in run_pages if isinstance(page, Mapping)
     ] if isinstance(run_pages, list) else []
+    try:
+        expected_outputs = make_output_names(mapped_inputs) if mapped_inputs else []
+    except ValueError:
+        expected_outputs = []
     exact_bijection = (
         bool(run_pages)
         and mapped_outputs == expected_outputs
@@ -950,23 +953,24 @@ def migrate_project(
             }
         )
 
-    output_names = make_output_names(len(pages))
+    input_names = [page.relative_to(project.input_dir).as_posix() for page in pages]
+    output_names = make_output_names(input_names)
     page_infos: list[dict[str, Any]] = []
-    for index, (page, page_id, output_name, input_record) in enumerate(
-        zip(pages, page_ids, output_names, input_records), start=1
+    for index, (page, page_id, input_name, output_name, input_record) in enumerate(
+        zip(pages, page_ids, input_names, output_names, input_records), start=1
     ):
-        alignment = _page_row(alignment_lookup, index, page.name, output_name)
+        alignment = _page_row(alignment_lookup, index, input_name, output_name)
         page_infos.append(
             {
                 "index": index,
                 "page_id": page_id,
-                "input_name": page.name,
+                "input_name": input_name,
                 "input_path": input_record["path"],
                 "input_sha256": input_record["sha256"],
                 "output_name": output_name,
                 "alignment_state": _alignment_state(alignment),
                 "scene_key": _scene_values(alignment),
-                "repair_row": _page_row(repair_lookup, index, page.name, output_name),
+                "repair_row": _page_row(repair_lookup, index, input_name, output_name),
             }
         )
 
@@ -1521,7 +1525,7 @@ def _validate_bundle_documents(artifacts: Mapping[str, Any]) -> list[str]:
     if (
         len(outputs) != len(run_pages)
         or len(set(outputs)) != len(outputs)
-        or outputs != make_output_names(len(outputs))
+        or outputs != make_output_names(inputs)
         or len(set(inputs)) != len(inputs)
     ):
         errors.append("manifest input/output bijection invalid")

@@ -28,11 +28,6 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
-# Task 3 must remove the integer overload and this marker when manifest
-# initialization supplies source-relative paths directly.
-REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3 = True
-
-
 def normalize_page_id(value: object) -> str:
     """Return the canonical identifier represented by a page filename."""
     if not isinstance(value, (str, os.PathLike)):
@@ -97,16 +92,8 @@ def normalize_relative_image_path(value: object) -> str:
     return "/".join(components)
 
 
-def make_output_names(inputs: Iterable[object] | int) -> list[str]:
-    """Return exact source-relative output names.
-
-    The integer overload is a temporary Task 2 compatibility seam for manifest
-    initialization and must be removed when Task 3 supplies source paths.
-    """
-    if isinstance(inputs, int) and not isinstance(inputs, bool):
-        if inputs <= 0:
-            raise ValueError("count must be a positive integer")
-        return [f"{index:04d}.jpg" for index in range(1, inputs + 1)]
+def make_output_names(inputs: Iterable[object]) -> list[str]:
+    """Return exact source-relative output names."""
     if isinstance(inputs, (str, bytes, os.PathLike)):
         raise ValueError("inputs must be a non-empty iterable of relative image paths")
     try:

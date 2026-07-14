@@ -166,6 +166,31 @@ class ComicContinuityToolsTests(unittest.TestCase):
             )
         run_path = evidence / "comic_run_manifest.json"
         run = json.loads(run_path.read_text(encoding="utf-8"))
+        # These completed-fixture tests intentionally target the legacy V3
+        # validator. Keep their synthetic conversion outside the production V4
+        # initializer, whose output names stay exact and whose batches stay absent.
+        legacy_output_names = [f"{index:04d}.jpg" for index in range(1, count + 1)]
+        run.update(schema_version="3.0", pipeline_mode="scene_cluster_v1")
+        for page, output_name in zip(run["pages"], legacy_output_names):
+            page["output_name"] = output_name
+        atomic_write_json(run_path, run)
+
+        alignment_path = evidence / "novel_alignment.json"
+        alignment = json.loads(alignment_path.read_text(encoding="utf-8"))
+        for page, output_name in zip(alignment["pages"], legacy_output_names):
+            page["output_name"] = output_name
+        atomic_write_json(alignment_path, alignment)
+
+        repair_path = evidence / "repair_log.json"
+        repair = json.loads(repair_path.read_text(encoding="utf-8"))
+        repair.update(schema_version="3.0", pipeline_mode="scene_cluster_v1")
+        batches, page_to_batch = manifest_module._build_batches(legacy_output_names)
+        repair["batches"] = batches
+        for page, output_name in zip(repair["pages"], legacy_output_names):
+            page["output_name"] = output_name
+            page["batch_id"] = page_to_batch[output_name]
+        atomic_write_json(repair_path, repair)
+
         run["status"] = "batch_qa_passed"
         lock_ids = [f"lock-{category}" for category in manifest_module.CONTINUITY_CATEGORIES]
         output_names = [page["output_name"] for page in run["pages"]]
@@ -590,16 +615,16 @@ class ComicContinuityToolsTests(unittest.TestCase):
         self.assertEqual({"version": 2, "中文": "保留"}, json.loads(target.read_text(encoding="utf-8")))
         self.assertEqual([], list(target.parent.glob("tmp*")))
 
-    def test_manifest_uses_four_digit_contiguous_names_and_declares_all_evidence_files(self):
-        for number in range(189, 285):
-            self.add_page(f"{number}.jpg")
-        self.add_page("252（1）.jpg", "gray")
-        self.add_page("269（1）.jpg", "black")
+    def test_manifest_preserves_source_names_and_declares_all_evidence_files(self):
+        for name in ("189.jpg", "252（1）.jpg", "分卷/269.webp"):
+            self.add_page(name)
         evidence = self.root / "证据"
-        result = build_manifests(self.root, evidence, expected_count=98)
-        self.assertEqual(98, len(result["pages"]))
-        self.assertEqual("0001.jpg", result["pages"][0]["output_name"])
-        self.assertEqual("0098.jpg", result["pages"][-1]["output_name"])
+        result = build_manifests(self.root, evidence, expected_count=3)
+        self.assertEqual(3, len(result["pages"]))
+        self.assertEqual(
+            ["189.jpg", "252（1）.jpg", "分卷/269.webp"],
+            [page["output_name"] for page in result["pages"]],
+        )
         self.assertEqual(
             {
                 "comic_run_manifest.json",
@@ -612,13 +637,18 @@ class ComicContinuityToolsTests(unittest.TestCase):
                 "task_queue.json",
                 "failure_learning.json",
                 "scene_cluster_qa.json",
+                "entity_state_timeline.json",
+                "page_audit.json",
+                "review_events.jsonl",
+                "text_geometry.json",
+                "regression_summary.json",
             },
             set(EVIDENCE_FILES),
         )
         self.assertTrue(all((evidence / name).exists() for name in EVIDENCE_FILES))
 
-    def test_manifest_derives_three_page_count_and_scene_cluster_contract(self):
-        for name in ("3.jpg", "1.jpg", "2.jpg"):
+    def test_manifest_initializes_v4_exact_names_and_required_registries(self):
+        for name in ("3.webp", "1.jpg", "章节/2.PNG"):
             self.add_page(name)
         evidence = self.root / "证据"
 
@@ -626,13 +656,35 @@ class ComicContinuityToolsTests(unittest.TestCase):
         repair = json.loads((evidence / "repair_log.json").read_text(encoding="utf-8"))
 
         self.assertEqual(3, result["expected_count"])
-        self.assertEqual("scene_cluster_v1", result["pipeline_mode"])
-        self.assertEqual("3.0", result["schema_version"])
+        self.assertEqual("continuity_v4", result["pipeline_mode"])
+        self.assertEqual("4.0", result["schema_version"])
         self.assertEqual(list(EVIDENCE_FILES), result["evidence_files"])
         self.assertEqual(
-            ["0001.jpg", "0002.jpg", "0003.jpg"],
+            ["1.jpg", "3.webp", "章节/2.PNG"],
             [page["output_name"] for page in result["pages"]],
         )
+        self.assertEqual(
+            [page["input_name"] for page in result["pages"]],
+            [page["output_name"] for page in result["pages"]],
+        )
+        self.assertEqual(
+            {
+                "entity_state_timeline.json",
+                "page_audit.json",
+                "review_events.jsonl",
+                "text_geometry.json",
+                "regression_summary.json",
+            },
+            {name for name in EVIDENCE_FILES if name in {
+                "entity_state_timeline.json",
+                "page_audit.json",
+                "review_events.jsonl",
+                "text_geometry.json",
+                "regression_summary.json",
+            }},
+        )
+        self.assertTrue(all((evidence / name).is_file() for name in EVIDENCE_FILES))
+        self.assertEqual(b"", (evidence / "review_events.jsonl").read_bytes())
         neutral_fields = {
             "cluster_id": None,
             "reference_pack_id": None,
@@ -645,19 +697,20 @@ class ComicContinuityToolsTests(unittest.TestCase):
         for page in result["pages"]:
             for key, value in neutral_fields.items():
                 self.assertEqual(value, page[key])
-        self.assertEqual("scene_cluster_v1", repair["pipeline_mode"])
-        self.assertEqual("3.0", repair["schema_version"])
+        self.assertEqual("continuity_v4", repair["pipeline_mode"])
+        self.assertEqual("4.0", repair["schema_version"])
+        self.assertNotIn("batches", repair)
         for page in repair["pages"]:
             for key, value in neutral_fields.items():
                 self.assertEqual(value, page[key])
 
-    def test_manifest_derives_three_hundred_page_output_names(self):
+    def test_manifest_derives_three_hundred_exact_output_names(self):
         for number in range(1, 301):
             self.add_page(f"{number}.jpg", color=(number % 255, 0, 0))
         result = build_manifests(self.root, self.root / "证据")
         self.assertEqual(300, result["expected_count"])
-        self.assertEqual("0001.jpg", result["pages"][0]["output_name"])
-        self.assertEqual("0300.jpg", result["pages"][-1]["output_name"])
+        self.assertEqual("1.jpg", result["pages"][0]["output_name"])
+        self.assertEqual("300.jpg", result["pages"][-1]["output_name"])
 
     def test_manifest_rejects_provided_count_that_differs_from_inputs(self):
         for number in range(1, 4):
@@ -685,13 +738,13 @@ class ComicContinuityToolsTests(unittest.TestCase):
         manifest = json.loads((evidence / "comic_run_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(3, manifest["expected_count"])
 
-    def test_manifest_balances_thirteen_pages_into_seven_and_six(self):
+    def test_manifest_does_not_initialize_legacy_batches(self):
         for number in range(1, 14):
             self.add_page(f"{number}.jpg")
         evidence = self.root / "证据"
         build_manifests(self.root, evidence, expected_count=13)
         repair = json.loads((evidence / "repair_log.json").read_text(encoding="utf-8"))
-        self.assertEqual([7, 6], [len(batch["member_pages"]) for batch in repair["batches"]])
+        self.assertNotIn("batches", repair)
 
     def test_batch_sizes_are_deterministic_for_three_fifteen_and_three_hundred(self):
         self.assertEqual([3], manifest_module.expected_batch_sizes(3))
@@ -703,22 +756,6 @@ class ComicContinuityToolsTests(unittest.TestCase):
             with self.subTest(count=count):
                 with self.assertRaises(ValueError):
                     manifest_module.expected_batch_sizes(count)
-
-    def test_manifest_partitions_98_pages_into_nine_contextual_batches(self):
-        for number in range(1, 99):
-            self.add_page(f"{number}.jpg")
-        evidence = self.root / "证据"
-        build_manifests(self.root, evidence, expected_count=98)
-        repair = json.loads((evidence / "repair_log.json").read_text(encoding="utf-8"))
-        self.assertEqual(9, len(repair["batches"]))
-        ordered = [f"{index:04d}.jpg" for index in range(1, 99)]
-        for batch in repair["batches"]:
-            members = batch["member_pages"]
-            self.assertTrue(8 <= len(members) <= 12)
-            start = ordered.index(members[0])
-            end = start + len(members)
-            self.assertEqual(ordered[max(0, start - 2):start], batch["context_before"])
-            self.assertEqual(ordered[end:end + 2], batch["context_after"])
 
     def test_manifest_does_not_overwrite_existing_evidence_without_force(self):
         self.add_page("189.jpg")
@@ -803,6 +840,23 @@ class ComicContinuityToolsTests(unittest.TestCase):
         before = {path: sha256_file(path) for path in materials}
         build_manifests(self.root, self.root / "证据", expected_count=1)
         self.assertEqual(before, {path: sha256_file(path) for path in materials})
+
+    def test_manifest_does_not_create_or_modify_output_tree(self):
+        self.add_page("nested/189.webp")
+        existing = self.root / "输出" / "keep" / "existing.png"
+        existing.parent.mkdir(parents=True)
+        Image.new("RGB", (8, 8), "blue").save(existing)
+
+        def output_snapshot():
+            return {
+                path.relative_to(self.root / "输出").as_posix(): sha256_file(path)
+                for path in (self.root / "输出").rglob("*")
+                if path.is_file()
+            }
+
+        before = output_snapshot()
+        build_manifests(self.root, self.root / "证据", expected_count=1)
+        self.assertEqual(before, output_snapshot())
 
     def test_all_clis_have_help_and_fail_nonzero_for_missing_project(self):
         for script in ("inventory_project.py", "build_output_manifest.py", "validate_output.py"):
@@ -1388,10 +1442,7 @@ class ComicContinuityToolsTests(unittest.TestCase):
         self.assertTrue(any("checks incomplete" in error for error in validate_project(self.root, evidence, 1)["errors"]))
 
     def test_validator_rejects_wrong_batch_count_for_98_pages(self):
-        for number in range(1, 99):
-            self.add_page(f"{number}.jpg")
-        evidence = self.root / "证据"
-        build_manifests(self.root, evidence, 98)
+        evidence = self.make_complete_fixture(count=98)
         path = evidence / "repair_log.json"
         document = json.loads(path.read_text(encoding="utf-8"))
         document["batches"].append(dict(document["batches"][-1], batch_id="batch-010"))

@@ -294,7 +294,7 @@ class MigrationDryRunTests(unittest.TestCase):
             artifacts = migrate_project(root, now=FIXED_NOW)["artifacts"]
             cluster = artifacts["scene_clusters.json"]["clusters"][0]
 
-            self.assertEqual(cluster["member_pages"], ["0001.jpg", "0002.jpg", "0003.jpg"])
+            self.assertEqual(cluster["member_pages"], ["1.jpg", "2.jpg", "3.jpg"])
             self.assertTrue(cluster["undersized"])
             self.assertTrue(cluster["boundary_exception"])
             self.assertEqual(cluster["undersized_reason"], "project_total_below_min")
@@ -346,7 +346,7 @@ class MigrationDryRunTests(unittest.TestCase):
             result = migrate_project(root, now=FIXED_NOW)
 
             clusters = result["artifacts"]["scene_clusters.json"]["clusters"]
-            blocked = [cluster for cluster in clusters if "0002.jpg" in cluster["member_pages"]]
+            blocked = [cluster for cluster in clusters if "2.jpg" in cluster["member_pages"]]
             self.assertEqual(len(blocked), 1)
             self.assertEqual(blocked[0]["alignment_state"], "unresolved")
             self.assertTrue(blocked[0]["blocked"])
@@ -356,7 +356,7 @@ class MigrationDryRunTests(unittest.TestCase):
             task = next(
                 task
                 for task in result["artifacts"]["task_queue.json"]["tasks"]
-                if task["page_id"] == "0002"
+                if task["page_id"] == "2"
             )
             self.assertEqual(task["task_type"], "evidence_resolution")
 
@@ -376,7 +376,7 @@ class MigrationDryRunTests(unittest.TestCase):
             cluster = next(
                 item
                 for item in result["artifacts"]["scene_clusters.json"]["clusters"]
-                if "0002.jpg" in item["member_pages"]
+                if "2.jpg" in item["member_pages"]
             )
             self.assertEqual(cluster["alignment_state"], "provisional")
             before = _tree_hashes(root / "evidence")
@@ -452,7 +452,7 @@ class MigrationDryRunTests(unittest.TestCase):
             self.assertEqual(first["report"]["task_count"], 13)
             self.assertEqual(len(first["report"]["planned_outputs"]), 13)
 
-    def test_v3_proposals_have_registry_hashes_output_members_and_safe_traces(self) -> None:
+    def test_proposals_have_registry_hashes_exact_output_members_and_safe_traces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_project(Path(tmp) / "project", count=13)
 
@@ -475,7 +475,7 @@ class MigrationDryRunTests(unittest.TestCase):
             )
             clusters = artifacts["scene_clusters.json"]["clusters"]
             members = [member for cluster in clusters for member in cluster["member_pages"]]
-            self.assertEqual(members, [f"{index:04d}.jpg" for index in range(1, 14)])
+            self.assertEqual(members, [f"{index}.jpg" for index in range(1, 14)])
             self.assertTrue(all("source_pages" in cluster for cluster in clusters))
             for filename in (
                 "scene_clusters.json",
@@ -499,9 +499,9 @@ class MigrationDryRunTests(unittest.TestCase):
             self.assertEqual({row["status"] for row in qa_rows}, {"pending"})
             manifest = artifacts["comic_run_manifest.json"]
             repair = artifacts["repair_log.json"]
-            self.assertEqual(manifest["pipeline_mode"], "scene_cluster_v1")
-            self.assertEqual(repair["schema_version"], "3.0")
-            self.assertEqual(len(manifest["evidence_files"]), 10)
+            self.assertEqual(manifest["pipeline_mode"], "continuity_v4")
+            self.assertEqual(repair["schema_version"], "4.0")
+            self.assertEqual(len(manifest["evidence_files"]), 15)
             for run_row, repair_row in zip(manifest["pages"], repair["pages"]):
                 for field in ("cluster_id", "reference_pack_id", "task_id"):
                     self.assertTrue(run_row[field])
@@ -537,7 +537,7 @@ class MigrationDryRunTests(unittest.TestCase):
             document = json.loads(alignment_path.read_text(encoding="utf-8"))
             document["pages"][0].update(
                 index=99,
-                output_name="0001.jpg",
+                output_name="1.jpg",
                 scene_id="exact-scene",
                 scene_summary="must-not-be-scene-key",
             )
@@ -559,7 +559,7 @@ class MigrationDryRunTests(unittest.TestCase):
             first_cluster = next(
                 cluster
                 for cluster in result["artifacts"]["scene_clusters.json"]["clusters"]
-                if "0001.jpg" in cluster["member_pages"]
+                if "1.jpg" in cluster["member_pages"]
             )
             self.assertEqual(first_cluster["scene_key"][3], "exact-scene")
             self.assertNotIn("must-not-be-scene-key", first_cluster["scene_key"])

@@ -10,7 +10,6 @@ from pipeline_contracts import (  # noqa: E402
     ALIGNMENT_STATES,
     PAGE_CLASSES,
     REVIEW_STATES,
-    REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3,
     TASK_STATES,
     canonical_hash,
     make_output_names,
@@ -61,9 +60,9 @@ class PipelineContractTests(unittest.TestCase):
             ["252（1）.jpg", "chapter/2.webp", "彩页/03.PNG"],
         )
 
-    def test_make_output_names_keeps_deprecated_int_seam_until_task_3(self):
-        self.assertTrue(REMOVE_LEGACY_INT_OUTPUT_NAMES_IN_TASK_3)
-        self.assertEqual(make_output_names(3), ["0001.jpg", "0002.jpg", "0003.jpg"])
+    def test_make_output_names_rejects_legacy_integer_count(self):
+        with self.assertRaisesRegex(ValueError, "iterable of relative image paths"):
+            make_output_names(3)
 
     def test_make_output_names_rejects_case_insensitive_duplicates(self):
         with self.assertRaisesRegex(ValueError, "duplicate output name"):

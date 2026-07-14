@@ -32,6 +32,11 @@ EVIDENCE_FILES = (
     "task_queue.json",
     "failure_learning.json",
     "scene_cluster_qa.json",
+    "entity_state_timeline.json",
+    "page_audit.json",
+    "review_events.jsonl",
+    "text_geometry.json",
+    "regression_summary.json",
 )
 FINAL_REPORT_KEYS = (
     "status",
@@ -99,8 +104,8 @@ CONTINUITY_LOCK_FIELDS = frozenset(
         "confirmed", "reviewer", "reviewed_at",
     }
 )
-PIPELINE_MODE = "scene_cluster_v1"
-SCHEMA_VERSION = "3.0"
+PIPELINE_MODE = "continuity_v4"
+SCHEMA_VERSION = "4.0"
 
 
 def partition_batch_sizes(page_count: int) -> list[int]:
@@ -187,27 +192,61 @@ def _stage_evidence_set(
     atomic_write_json(staging / EVIDENCE_FILES[3], repair_log)
     _atomic_write_text(
         staging / EVIDENCE_FILES[4],
-        "# FINAL QA REPORT\n\nstatus: pending\n",
+        "# FINAL QA REPORT\n\nstatus: pending\n\nFinal validation has not been performed.\n",
     )
     queue_document = new_queue()
+    queue_document["status"] = "pending"
     queue_document["registry_hash"] = queue_registry_hash(queue_document)
-    registry_documents = [
-        {"schema_version": "1.0", "clusters": []},
-        {
+    registry_documents = {
+        "scene_clusters.json": {
             "schema_version": "1.0",
+            "status": "pending",
+            "clusters": [],
+        },
+        "style_reference_packs.json": {
+            "schema_version": "1.0",
+            "status": "pending",
             "stable_pages": [],
             "approved_hashes": {},
             "reference_packs": [],
         },
-        queue_document,
-        new_failure_store(),
-        {"schema_version": "1.0", "clusters": []},
-    ]
-    for filename, document in zip(EVIDENCE_FILES[5:], registry_documents):
+        "task_queue.json": queue_document,
+        "failure_learning.json": {
+            **new_failure_store(),
+            "status": "pending",
+        },
+        "scene_cluster_qa.json": {
+            "schema_version": "1.0",
+            "status": "pending",
+            "clusters": [],
+        },
+        "entity_state_timeline.json": {
+            "schema_version": "1.0",
+            "status": "pending",
+            "entities": [],
+        },
+        "page_audit.json": {
+            "schema_version": "1.0",
+            "status": "pending",
+            "pages": [],
+        },
+        "text_geometry.json": {
+            "schema_version": "1.0",
+            "status": "pending",
+            "pages": [],
+        },
+        "regression_summary.json": {
+            "schema_version": "1.0",
+            "status": "pending",
+            "regressions": [],
+        },
+    }
+    for filename, document in registry_documents.items():
         document = dict(document)
         if "registry_hash" not in document:
             document["registry_hash"] = canonical_hash(document)
         atomic_write_json(staging / filename, document)
+    _atomic_write_text(staging / "review_events.jsonl", "")
 
 
 def _commit_evidence_set(evidence: Path, staging: Path) -> None:
@@ -276,11 +315,12 @@ def build_manifests(
     if existing and not force:
         raise FileExistsError(f"evidence already exists: {', '.join(existing)}")
 
-    output_names = make_output_names(expected_count)
+    input_names = [page.relative_to(project.input_dir).as_posix() for page in pages]
+    output_names = make_output_names(input_names)
     page_rows = [
         {
             "index": index,
-            "input_name": page.name,
+            "input_name": input_names[index - 1],
             "input_sha256": sha256_file(page),
             "output_name": output_names[index - 1],
             "output_sha256": None,
@@ -349,18 +389,15 @@ def build_manifests(
             for row in page_rows
         ],
     }
-    batches, page_to_batch = _build_batches([row["output_name"] for row in page_rows])
     repair_log = {
         "schema_version": SCHEMA_VERSION,
         "pipeline_mode": PIPELINE_MODE,
         "evidence_files": list(EVIDENCE_FILES),
         "status": "inventoried",
-        "batches": batches,
         "pages": [
             {
                 "index": row["index"],
                 "output_name": row["output_name"],
-                "batch_id": page_to_batch[row["output_name"]],
                 "continuity_lock_ids": [],
                 "cluster_id": None,
                 "reference_pack_id": None,
