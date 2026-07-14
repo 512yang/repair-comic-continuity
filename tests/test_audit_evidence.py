@@ -21,6 +21,7 @@ from audit_evidence import (  # noqa: E402
     route_page_decision,
     validate_review_log,
 )
+from pipeline_contracts import canonical_hash  # noqa: E402
 
 
 def valid_audit(**overrides):
@@ -100,32 +101,18 @@ class AuditEvidenceRedTests(unittest.TestCase):
         self.assertEqual(result["decision"], "unchanged")
 
     def test_facial_hair_drift_at_medium_confidence_requires_second_review(self):
-        continuity = valid_audit(
-            confidence=0.72,
-            findings=[
+        result = route_page_decision(
+            [
                 {
                     "code": "FACIAL_HAIR_DRIFT",
                     "category": "visual",
                     "blocking": True,
                 }
             ],
-            classification="defect",
-            classification_evidence=["beard differs from adjacent pages"],
-        )
-        source = valid_audit(
-            perspective="source",
-            reviewer="reviewer-b",
-            confidence=0.72,
-            artifact={
-                "path": "artifacts/场景/252（1）-source.png",
-                "sha256": "c" * 64,
-                "kind": "full_resolution_page",
-            },
+            0.72,
         )
 
-        result = aggregate_page_audits([continuity, source])
-
-        self.assertEqual(result["decision"], "second_review_required")
+        self.assertEqual(result, "second_review_required")
 
 
 class AuditRecordContractTests(unittest.TestCase):
@@ -334,6 +321,49 @@ class DualAuditAndRoutingTests(unittest.TestCase):
             "evidence_blocked",
         )
 
+    def test_high_confidence_classification_disagreement_is_evidence_blocked(self):
+        continuity = valid_audit(
+            findings=[
+                {
+                    "code": "FACIAL_HAIR_DRIFT",
+                    "category": "visual",
+                    "blocking": True,
+                }
+            ],
+            classification="defect",
+            classification_evidence=["beard differs from stable anchor"],
+        )
+
+        result = aggregate_page_audits([continuity, self.source_audit()])
+
+        self.assertEqual(result["decision"], "evidence_blocked")
+        self.assertTrue(result["perspective_disagreement"])
+
+    def test_matching_finding_from_both_reviewers_is_confirmed_not_duplicate(self):
+        finding = {
+            "code": "STYLE_DRIFT",
+            "category": "visual",
+            "blocking": True,
+        }
+        continuity = valid_audit(
+            findings=[finding],
+            classification="defect",
+            classification_evidence=["line work differs"],
+        )
+        source = self.source_audit(
+            findings=[finding],
+            classification="defect",
+            classification_evidence=["line work differs"],
+        )
+
+        result = aggregate_page_audits([continuity, source])
+
+        self.assertEqual(result["decision"], "full_page_redraw")
+        self.assertEqual(
+            result["finding_evidence"][0]["perspectives"],
+            ["continuity", "source"],
+        )
+
     def test_route_rejects_boolean_and_nonfinite_confidence_without_mutation(self):
         findings = [{"code": "TEXT_ERROR", "category": "text", "blocking": True}]
         original = copy.deepcopy(findings)
@@ -412,6 +442,33 @@ class AppendOnlyReviewLogTests(unittest.TestCase):
                 append_review_event(Path(tmp) / "reviews.jsonl", event)
             with self.assertRaisesRegex(ValueError, "jsonl"):
                 append_review_event(Path(tmp) / "reviews.txt", self.event(1))
+
+    def test_existing_hash_valid_event_is_still_rejected_when_schema_is_unsafe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            row = {
+                **self.event(1),
+                "page": "../unsafe.jpg",
+                "previous_event_hash": None,
+            }
+            row["event_hash"] = canonical_hash(row)
+            payload = (
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            path.write_bytes(payload.encode("utf-8"))
+
+            with self.assertRaisesRegex(ValueError, "review log.*schema"):
+                validate_review_log(path)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "review log.*schema"):
+                append_review_event(path, self.event(2))
+            self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

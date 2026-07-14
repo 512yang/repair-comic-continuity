@@ -282,12 +282,55 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     ):
         raise ValueError("dual audits must bind the same dimensions")
 
-    findings = continuity["findings"] + source["findings"]
-    disagreement = any(
-        record.get("perspective_disagreement", False) for record in records
+    merged_findings: dict[tuple[str, str, bool], dict[str, Any]] = {}
+    code_shapes: dict[str, set[tuple[str, bool]]] = {}
+    for perspective in ("continuity", "source"):
+        record = by_perspective[perspective]
+        for finding in record["findings"]:
+            signature = (
+                finding["code"],
+                finding["category"],
+                finding["blocking"],
+            )
+            code_shapes.setdefault(finding["code"], set()).add(
+                (finding["category"], finding["blocking"])
+            )
+            if signature not in merged_findings:
+                merged_findings[signature] = {
+                    **copy.deepcopy(finding),
+                    "perspectives": [],
+                    "reviewers": [],
+                }
+            merged_findings[signature]["perspectives"].append(perspective)
+            merged_findings[signature]["reviewers"].append(record["reviewer"])
+    finding_evidence = [
+        merged_findings[key]
+        for key in sorted(merged_findings, key=lambda item: (item[0], item[1], item[2]))
+    ]
+    findings_for_route = [
+        {
+            key: value
+            for key, value in finding.items()
+            if key not in {"perspectives", "reviewers"}
+        }
+        for finding in finding_evidence
+    ]
+
+    classification_conflict = (
+        continuity["classification"] != source["classification"]
+        and "defect"
+        in {continuity["classification"], source["classification"]}
+    )
+    finding_shape_conflict = any(len(shapes) > 1 for shapes in code_shapes.values())
+    disagreement = (
+        classification_conflict
+        or finding_shape_conflict
+        or any(
+            record.get("perspective_disagreement", False) for record in records
+        )
     )
     decision = route_page_decision(
-        findings,
+        findings_for_route,
         min(record["confidence"] for record in records),
         perspective_disagreement=disagreement,
     )
@@ -302,6 +345,18 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             "continuity": continuity["evidence_hash"],
             "source": source["evidence_hash"],
         },
+        "classification_evidence": {
+            "continuity": {
+                "classification": continuity["classification"],
+                "evidence": continuity["classification_evidence"],
+            },
+            "source": {
+                "classification": source["classification"],
+                "evidence": source["classification_evidence"],
+            },
+        },
+        "finding_evidence": finding_evidence,
+        "perspective_disagreement": disagreement,
         "decision": decision,
     }
     result["aggregate_hash"] = canonical_hash(result)
@@ -440,6 +495,19 @@ def _parse_review_log(payload: bytes) -> list[dict[str, Any]]:
         ).encode("utf-8")
         if canonical_line != raw_line:
             raise ValueError(f"review log line {index} is not canonical")
+        event_payload = dict(row)
+        del event_payload["event_hash"]
+        del event_payload["previous_event_hash"]
+        try:
+            normalized_event = _normalize_event(event_payload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"review log line {index} fails event schema validation: {exc}"
+            ) from exc
+        if normalized_event != event_payload:
+            raise ValueError(
+                f"review log line {index} fails event schema canonicalization"
+            )
         rows.append(row)
         expected_previous = claimed
     return rows
