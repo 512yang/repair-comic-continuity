@@ -7,7 +7,9 @@ import json
 import math
 import os
 import re
+import stat
 import threading
+import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -64,6 +66,7 @@ FINDING_REGISTRY = MappingProxyType(
 )
 _KNOWN_DEFECT_CODES = frozenset(FINDING_REGISTRY)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_REVIEWER_ID_RE = re.compile(r"[a-z][a-z0-9._-]{2,63}\Z")
 _PERSPECTIVES = frozenset({"continuity", "source"})
 _CLASSIFICATIONS = frozenset({"unchanged", "defect", "evidence_blocked"})
 _LOG_LOCKS: dict[str, threading.Lock] = {}
@@ -95,6 +98,24 @@ def _require_nonempty_string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _normalize_unicode_id(value: object, field: str) -> str:
+    text = _require_nonempty_string(value, field)
+    normalized = unicodedata.normalize("NFKC", text).strip().casefold()
+    if not normalized or any(
+        unicodedata.category(char).startswith("C") for char in normalized
+    ):
+        raise ValueError(f"{field} contains an unsafe Unicode character")
+    return normalized
+
+
+def _require_reviewer_id(value: object) -> str:
+    if not isinstance(value, str) or not _REVIEWER_ID_RE.fullmatch(value):
+        raise ValueError(
+            "reviewer_id must be 3-64 lowercase ASCII id characters"
+        )
+    return value
 
 
 def _validate_timestamp(value: object) -> str:
@@ -156,18 +177,45 @@ def _validate_findings(
             raise ValueError(f"finding {index} blocking must be boolean")
         confidence = _require_confidence(finding.get("confidence"))
 
-        location = finding.get("location", finding.get("panel"))
-        entities = finding.get("entities")
-        has_location = isinstance(location, str) and bool(location.strip())
-        has_entities = (
-            isinstance(entities, Sequence)
-            and not isinstance(entities, (str, bytes))
-            and bool(entities)
-            and all(isinstance(entity, str) and entity.strip() for entity in entities)
-        )
+        has_location = "location" in finding
+        normalized_location: dict[str, str] | None = None
+        if has_location:
+            location = finding["location"]
+            if not isinstance(location, Mapping) or set(location) != {
+                "panel_id",
+                "region_id",
+            }:
+                raise ValueError(
+                    f"finding {index} location must contain panel_id and region_id"
+                )
+            normalized_location = {
+                "panel_id": _normalize_unicode_id(
+                    location.get("panel_id"), f"finding {index} location.panel_id"
+                ),
+                "region_id": _normalize_unicode_id(
+                    location.get("region_id"), f"finding {index} location.region_id"
+                ),
+            }
+
+        has_entities = "entities" in finding
+        normalized_entities: list[str] = []
+        if has_entities:
+            entities = finding["entities"]
+            if not isinstance(entities, list) or not entities:
+                raise ValueError(
+                    f"finding {index} entities must be a non-empty JSON list"
+                )
+            normalized_entities = sorted(
+                {
+                    _normalize_unicode_id(
+                        entity, f"finding {index} entities entry"
+                    )
+                    for entity in entities
+                }
+            )
         if not has_location and not has_entities:
             raise ValueError(
-                f"finding {index} requires location/panel or non-empty entities"
+                f"finding {index} requires location or non-empty entities"
             )
 
         evidence = finding.get("evidence")
@@ -205,10 +253,9 @@ def _validate_findings(
         normalized["code"] = code
         normalized["confidence"] = confidence
         if has_location:
-            normalized["location"] = location.strip()
-            normalized.pop("panel", None)
+            normalized["location"] = normalized_location
         if has_entities:
-            normalized["entities"] = [entity.strip() for entity in entities]
+            normalized["entities"] = normalized_entities
         normalized["evidence"] = {
             "path": evidence_path,
             "sha256": evidence_sha,
@@ -231,7 +278,7 @@ def _validate_findings(
         )
         semantic_signature = (
             code,
-            normalized.get("location"),
+            canonical_hash(normalized.get("location")),
             tuple(normalized.get("entities", [])),
         )
         if semantic_signature in semantic_signatures:
@@ -263,9 +310,7 @@ def record_page_audit(audit: Mapping[str, Any]) -> dict[str, Any]:
     if result.get("perspective") not in _PERSPECTIVES:
         raise ValueError("perspective must be continuity or source")
     result["reviewer"] = _require_nonempty_string(result.get("reviewer"), "reviewer")
-    result["reviewer_id"] = unicodedata.normalize(
-        "NFKC", result["reviewer"]
-    ).strip().casefold()
+    result["reviewer_id"] = _require_reviewer_id(result.get("reviewer_id"))
     result["reviewed_at"] = _validate_timestamp(result.get("reviewed_at"))
     result["confidence"] = _require_confidence(result.get("confidence"))
     result["inspected_panels"] = _validate_inspection_rows(
@@ -409,7 +454,7 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
                 finding["code"],
                 finding["category"],
                 finding["blocking"],
-                finding.get("location"),
+                canonical_hash(finding.get("location")),
                 tuple(finding.get("entities", [])),
                 finding["repair_scope"],
             )
@@ -422,7 +467,12 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
                     "perspectives": [],
                     "reviewers": [],
                     "reports": [],
+                    "min_confidence": finding["confidence"],
                 }
+            merged_findings[signature]["min_confidence"] = min(
+                merged_findings[signature]["min_confidence"],
+                finding["confidence"],
+            )
             merged_findings[signature]["perspectives"].append(perspective)
             merged_findings[signature]["reviewers"].append(record["reviewer"])
             merged_findings[signature]["reports"].append(
@@ -444,10 +494,15 @@ def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         {
             key: value
             for key, value in finding.items()
-            if key not in {"perspectives", "reviewers", "reports"}
+            if key
+            not in {"perspectives", "reviewers", "reports", "min_confidence"}
         }
         for finding in finding_evidence
     ]
+    for routing_finding, evidence_group in zip(
+        findings_for_route, finding_evidence
+    ):
+        routing_finding["confidence"] = evidence_group["min_confidence"]
 
     classification_conflict = (
         continuity["classification"] != source["classification"]
@@ -515,14 +570,15 @@ def _thread_lock_for(path: Path) -> threading.Lock:
 
 
 @contextmanager
-def _exclusive_log_lock(log_path: Path):
+def _exclusive_log_lock(log_path: Path, *, timeout_seconds: float = 30.0):
     """Coordinate readers/writers across Windows processes via a sidecar byte lock.
 
     The ``.lock`` file is intentionally persistent: deleting a lock file while
     another process has it open can split future processes across different file
     identities.  It contains no evidence and is never part of the event chain.
     """
-    lock_path = Path(str(log_path) + ".lock")
+    canonical_log_path = log_path.resolve(strict=False)
+    lock_path = Path(str(canonical_log_path) + ".lock")
     if lock_path.exists() and lock_path.is_symlink():
         raise ValueError("review log lock path must not be a symlink")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -536,7 +592,17 @@ def _exclusive_log_lock(log_path: Path):
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"review log lock timeout after {timeout_seconds:.1f}s"
+                        ) from exc
+                    time.sleep(0.02)
             try:
                 yield
             finally:
@@ -545,11 +611,36 @@ def _exclusive_log_lock(log_path: Path):
         else:  # pragma: no cover - exercised by non-Windows CI only
             import fcntl
 
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(
+                        lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"review log lock timeout after {timeout_seconds:.1f}s"
+                        ) from exc
+                    time.sleep(0.02)
             try:
                 yield
             finally:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _assert_single_link_regular_file(handle, log_path: Path) -> None:
+    file_stat = os.fstat(handle.fileno())
+    path_stat = os.stat(log_path, follow_symlinks=False)
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError("review log target must be a regular file")
+    if (file_stat.st_dev, file_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        raise ValueError("review log target identity changed while locked")
+    if file_stat.st_nlink != 1:
+        raise ValueError(
+            "review log hardlink aliases are forbidden; expected link count 1"
+        )
 
 
 def append_review_event(
@@ -572,6 +663,7 @@ def append_review_event(
             raise ValueError("review log path must not be a symlink")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a+b") as handle:
+            _assert_single_link_regular_file(handle, log_path)
             handle.seek(0)
             existing = handle.read()
             rows = _parse_review_log(existing)
@@ -598,6 +690,7 @@ def append_review_event(
                     raise OSError("injected append failure")
                 handle.flush()
                 os.fsync(handle.fileno())
+                _assert_single_link_regular_file(handle, log_path)
             except BaseException:
                 handle.seek(original_size)
                 handle.truncate(original_size)
@@ -614,7 +707,10 @@ def validate_review_log(path: str | Path) -> list[dict[str, Any]]:
         if not log_path.exists() or not log_path.is_file() or log_path.is_symlink():
             raise ValueError("review log does not exist as a regular file")
         try:
-            payload = log_path.read_bytes()
+            with log_path.open("rb") as handle:
+                _assert_single_link_regular_file(handle, log_path)
+                payload = handle.read()
+                _assert_single_link_regular_file(handle, log_path)
         except OSError as exc:
             raise ValueError(f"review log cannot be read: {exc}") from exc
     return copy.deepcopy(_parse_review_log(payload))

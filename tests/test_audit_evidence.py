@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import subprocess
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def finding(code, *, category=None, blocking=True, region="panel-1", **overrides
         "category": category,
         "blocking": blocking,
         "confidence": 0.95,
-        "location": region,
+        "location": {"panel_id": region, "region_id": "full"},
         "evidence": {
             "path": f"evidence/{code.casefold()}-{region}.png",
             "sha256": evidence_sha,
@@ -79,6 +80,7 @@ def valid_audit(**overrides):
         "height": 1600,
         "perspective": "continuity",
         "reviewer": "reviewer-a",
+        "reviewer_id": "reviewer-a",
         "reviewed_at": "2026-07-15T08:00:00+08:00",
         "confidence": 1.0,
         "inspected_panels": [{"panel": "p1", "checks": ["identity"]}],
@@ -136,6 +138,7 @@ class AuditEvidenceRedTests(unittest.TestCase):
         source = valid_audit(
             perspective="source",
             reviewer="reviewer-b",
+            reviewer_id="reviewer-b",
             artifact={
                 "path": "artifacts/场景/252（1）-source.png",
                 "sha256": "c" * 64,
@@ -328,12 +331,55 @@ class AuditRecordContractTests(unittest.TestCase):
                         )
                     )
 
+    def test_entities_are_strict_json_lists_and_normalized_deterministically(self):
+        base = finding("STYLE_DRIFT")
+        del base["location"]
+        for invalid_entities in ("character-a", 7, {"id": "character-a"}):
+            invalid = {**base, "entities": invalid_entities}
+            with self.subTest(entities=invalid_entities):
+                with self.assertRaisesRegex(ValueError, "entities"):
+                    record_page_audit(
+                        valid_audit(
+                            findings=[invalid],
+                            classification="defect",
+                            classification_evidence=["invalid entity structure"],
+                        )
+                    )
+
+        normalized_input = {
+            **base,
+            "finding_id": None,
+            "entities": [" 人物Ｂ ", "人物a", "人物Ａ"],
+        }
+        result = record_page_audit(
+            valid_audit(
+                findings=[normalized_input],
+                classification="defect",
+                classification_evidence=["entity-linked drift"],
+            )
+        )
+        self.assertEqual(result["findings"][0]["entities"], ["人物a", "人物b"])
+        self.assertRegex(result["findings"][0]["finding_id"], r"^[0-9a-f]{64}$")
+
+    def test_reviewer_id_is_explicit_restricted_and_not_derived_from_display(self):
+        with self.assertRaisesRegex(ValueError, "reviewer_id"):
+            record_page_audit(valid_audit(reviewer_id="reviewer\u200b-a"))
+        with self.assertRaisesRegex(ValueError, "reviewer_id"):
+            record_page_audit(valid_audit(reviewer_id="ＲＥＶＩＥＷＥＲ－Ａ"))
+
+        result = record_page_audit(
+            valid_audit(reviewer="Same Display", reviewer_id="stable-reviewer-01")
+        )
+        self.assertEqual(result["reviewer"], "Same Display")
+        self.assertEqual(result["reviewer_id"], "stable-reviewer-01")
+
 
 class DualAuditAndRoutingTests(unittest.TestCase):
     def source_audit(self, **overrides):
         defaults = {
             "perspective": "source",
             "reviewer": "reviewer-b",
+            "reviewer_id": "reviewer-b",
             "artifact": {
                 "path": "artifacts/场景/252（1）-source.png",
                 "sha256": "c" * 64,
@@ -349,13 +395,23 @@ class DualAuditAndRoutingTests(unittest.TestCase):
             aggregate_page_audits([continuity])
         with self.assertRaisesRegex(ValueError, "independent reviewer"):
             aggregate_page_audits(
-                [continuity, self.source_audit(reviewer="reviewer-a")]
+                [
+                    continuity,
+                    self.source_audit(
+                        reviewer="different display", reviewer_id="reviewer-a"
+                    ),
+                ]
             )
 
-        with self.assertRaisesRegex(ValueError, "independent reviewer"):
-            aggregate_page_audits(
-                [continuity, self.source_audit(reviewer="ＲＥＶＩＥＷＥＲ－Ａ")]
-            )
+        accepted = aggregate_page_audits(
+            [
+                valid_audit(reviewer="Same Display", reviewer_id="reviewer-a"),
+                self.source_audit(
+                    reviewer="Same Display", reviewer_id="reviewer-b"
+                ),
+            ]
+        )
+        self.assertEqual(accepted["decision"], "unchanged")
 
     def test_dual_audits_must_bind_same_page_source_and_dimensions(self):
         for overrides, message in (
@@ -480,6 +536,31 @@ class DualAuditAndRoutingTests(unittest.TestCase):
         self.assertEqual(reports[0]["finding"], continuity_finding)
         self.assertEqual(reports[1]["finding"], source_finding)
 
+    def test_merged_finding_routes_on_minimum_report_confidence(self):
+        continuity_finding = finding("STYLE_DRIFT", confidence=0.95)
+        source_finding = finding(
+            "STYLE_DRIFT",
+            confidence=0.65,
+            finding_id="d" * 64,
+            evidence={"path": "evidence/source-style.png", "sha256": "e" * 64},
+        )
+        continuity = valid_audit(
+            findings=[continuity_finding],
+            classification="defect",
+            classification_evidence=["continuity confirms"],
+        )
+        source = self.source_audit(
+            findings=[source_finding],
+            classification="defect",
+            classification_evidence=["source confirms with uncertainty"],
+        )
+
+        result = aggregate_page_audits([continuity, source])
+
+        self.assertEqual(result["decision"], "second_review_required")
+        self.assertEqual(result["finding_evidence"][0]["min_confidence"], 0.65)
+        self.assertEqual(len(result["finding_evidence"][0]["reports"]), 2)
+
     def test_any_blocked_audit_keeps_dual_aggregate_evidence_blocked(self):
         blocked = valid_audit(
             classification="evidence_blocked",
@@ -574,6 +655,25 @@ class AppendOnlyReviewLogTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 16)
             self.assertNotIn("injected-failure", {row["type"] for row in rows})
+
+    def test_hardlink_alias_is_rejected_instead_of_using_a_second_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            alias = Path(tmp) / "alias.jsonl"
+            append_review_event(path, self.event(1))
+            os.link(path, alias)
+
+            with self.assertRaisesRegex(ValueError, "hardlink"):
+                append_review_event(alias, self.event(2))
+            with self.assertRaisesRegex(ValueError, "hardlink"):
+                validate_review_log(path)
+
+    def test_eight_process_lock_stress_is_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            processes = self._spawn_appenders(path, workers=8, events_per_worker=3)
+            self._assert_processes_succeed(processes)
+            self.assertEqual(len(validate_review_log(path)), 24)
 
     def _spawn_appenders(self, path, *, workers, events_per_worker, include_failure=False):
         script = r'''
