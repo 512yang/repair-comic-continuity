@@ -2,8 +2,10 @@ import sys
 import tempfile
 import unittest
 import copy
+import hashlib
 import json
 import math
+import subprocess
 from pathlib import Path
 
 
@@ -22,6 +24,51 @@ from audit_evidence import (  # noqa: E402
     validate_review_log,
 )
 from pipeline_contracts import canonical_hash  # noqa: E402
+
+
+_CHECK_BY_CODE = {
+    "IDENTITY_DRIFT": "identity",
+    "FACIAL_HAIR_DRIFT": "facial_hair",
+    "ANATOMY_ERROR": "anatomy",
+    "COSTUME_DRIFT": "costume",
+    "PROP_DRIFT": "prop",
+    "SCENE_DRIFT": "scene",
+    "STYLE_DRIFT": "style",
+    "TEXT_ERROR": "text",
+    "SFX_ERROR": "sfx",
+}
+
+
+def finding(code, *, category=None, blocking=True, region="panel-1", **overrides):
+    if category is None:
+        category = "text" if code in {"TEXT_ERROR", "SFX_ERROR"} else "visual"
+    if code in NON_DEFECT_CODES:
+        blocking = False
+        category = "source"
+    evidence_sha = hashlib.sha256(f"{code}:{region}".encode("utf-8")).hexdigest()
+    result = {
+        "finding_id": hashlib.sha256(
+            f"finding:{code}:{region}:{evidence_sha}".encode("utf-8")
+        ).hexdigest(),
+        "code": code,
+        "category": category,
+        "blocking": blocking,
+        "confidence": 0.95,
+        "location": region,
+        "evidence": {
+            "path": f"evidence/{code.casefold()}-{region}.png",
+            "sha256": evidence_sha,
+        },
+        "repair_scope": (
+            "none"
+            if not blocking
+            else "text_only"
+            if category == "text"
+            else "full_page_redraw"
+        ),
+    }
+    result.update(overrides)
+    return result
 
 
 def valid_audit(**overrides):
@@ -60,6 +107,12 @@ def valid_audit(**overrides):
         },
     }
     audit.update(overrides)
+    if audit["classification"] == "defect" and "checks" not in overrides:
+        audit["checks"] = dict(audit["checks"])
+        for item in audit["findings"]:
+            required_check = _CHECK_BY_CODE.get(item.get("code"))
+            if item.get("blocking") is True and required_check:
+                audit["checks"][required_check] = False
     return audit
 
 
@@ -78,13 +131,7 @@ class AuditEvidenceRedTests(unittest.TestCase):
 
     def test_noncritical_action_variation_is_not_a_continuity_defect(self):
         continuity = valid_audit(
-            findings=[
-                {
-                    "code": "NON_CRITICAL_ACTION_VARIATION",
-                    "category": "source",
-                    "blocking": False,
-                }
-            ]
+            findings=[finding("NON_CRITICAL_ACTION_VARIATION")]
         )
         source = valid_audit(
             perspective="source",
@@ -102,13 +149,7 @@ class AuditEvidenceRedTests(unittest.TestCase):
 
     def test_facial_hair_drift_at_medium_confidence_requires_second_review(self):
         result = route_page_decision(
-            [
-                {
-                    "code": "FACIAL_HAIR_DRIFT",
-                    "category": "visual",
-                    "blocking": True,
-                }
-            ],
+            [finding("FACIAL_HAIR_DRIFT")],
             0.72,
         )
 
@@ -163,9 +204,7 @@ class AuditRecordContractTests(unittest.TestCase):
             record_page_audit(false_check)
 
         blocked = valid_audit(
-            findings=[
-                {"code": "TEXT_ERROR", "category": "text", "blocking": True}
-            ]
+            findings=[finding("TEXT_ERROR")]
         )
         with self.assertRaisesRegex(ValueError, "unchanged.*blocking"):
             record_page_audit(blocked)
@@ -216,18 +255,76 @@ class AuditRecordContractTests(unittest.TestCase):
                     record_page_audit(valid_audit(**{field: value}))
 
     def test_finding_requires_strict_fields(self):
-        for finding in (
-            {"code": "", "category": "visual", "blocking": True},
-            {"code": "STYLE_DRIFT", "category": "other", "blocking": True},
-            {"code": "STYLE_DRIFT", "category": "visual", "blocking": 1},
+        for invalid_finding in (
+            {**finding("STYLE_DRIFT"), "code": ""},
+            finding("STYLE_DRIFT", category="other"),
+            finding("STYLE_DRIFT", blocking=1),
         ):
-            with self.subTest(finding=finding):
+            with self.subTest(finding=invalid_finding):
                 with self.assertRaisesRegex(ValueError, "finding"):
                     record_page_audit(
                         valid_audit(
-                            findings=[finding],
+                            findings=[invalid_finding],
                             classification="defect",
                             classification_evidence=["observed mismatch"],
+                        )
+                    )
+
+    def test_finding_registry_rejects_semantic_spoofing_and_requires_failed_check(self):
+        for spoof in (
+            finding("STYLE_DRIFT", category="text"),
+            finding("STYLE_DRIFT", blocking=False),
+            finding("STYLE_DRIFT", repair_scope="text_only"),
+        ):
+            with self.subTest(spoof=spoof):
+                with self.assertRaisesRegex(ValueError, "STYLE_DRIFT"):
+                    record_page_audit(
+                        valid_audit(
+                            findings=[spoof],
+                            classification="defect",
+                            classification_evidence=["spoof attempt"],
+                        )
+                    )
+
+        audit = valid_audit(
+            findings=[finding("STYLE_DRIFT")],
+            classification="defect",
+            classification_evidence=["line work mismatch"],
+        )
+        audit["checks"]["style"] = True
+        with self.assertRaisesRegex(ValueError, "style.*check"):
+            record_page_audit(audit)
+
+    def test_same_code_in_different_regions_can_coexist(self):
+        audit = valid_audit(
+            findings=[
+                finding("STYLE_DRIFT", region="panel-1"),
+                finding("STYLE_DRIFT", region="panel-3"),
+            ],
+            classification="defect",
+            classification_evidence=["two separately inspected regions drift"],
+        )
+
+        result = record_page_audit(audit)
+
+        self.assertEqual(len(result["findings"]), 2)
+        self.assertNotEqual(
+            result["findings"][0]["finding_id"],
+            result["findings"][1]["finding_id"],
+        )
+
+    def test_finding_requires_confidence_location_evidence_and_scope(self):
+        base = finding("STYLE_DRIFT")
+        for missing in ("confidence", "location", "evidence", "repair_scope"):
+            invalid = dict(base)
+            del invalid[missing]
+            with self.subTest(missing=missing):
+                with self.assertRaisesRegex(ValueError, missing):
+                    record_page_audit(
+                        valid_audit(
+                            findings=[invalid],
+                            classification="defect",
+                            classification_evidence=["incomplete finding"],
                         )
                     )
 
@@ -255,6 +352,11 @@ class DualAuditAndRoutingTests(unittest.TestCase):
                 [continuity, self.source_audit(reviewer="reviewer-a")]
             )
 
+        with self.assertRaisesRegex(ValueError, "independent reviewer"):
+            aggregate_page_audits(
+                [continuity, self.source_audit(reviewer="ＲＥＶＩＥＷＥＲ－Ａ")]
+            )
+
     def test_dual_audits_must_bind_same_page_source_and_dimensions(self):
         for overrides, message in (
             ({"page": "场景/253.jpg"}, "same page"),
@@ -269,9 +371,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
         for code in sorted(NON_DEFECT_CODES):
             with self.subTest(code=code):
                 continuity = valid_audit(
-                    findings=[
-                        {"code": code, "category": "source", "blocking": False}
-                    ]
+                    findings=[finding(code)]
                 )
                 result = aggregate_page_audits([continuity, self.source_audit()])
                 self.assertEqual(result["decision"], "unchanged")
@@ -279,21 +379,21 @@ class DualAuditAndRoutingTests(unittest.TestCase):
     def test_high_confidence_routes_text_visual_and_combined_deterministically(self):
         self.assertEqual(
             route_page_decision(
-                [{"code": "TEXT_ERROR", "category": "text", "blocking": True}],
+                [finding("TEXT_ERROR")],
                 0.90,
             ),
             "text_only",
         )
         self.assertEqual(
             route_page_decision(
-                [{"code": "STYLE_DRIFT", "category": "visual", "blocking": True}],
+                [finding("STYLE_DRIFT")],
                 1.0,
             ),
             "full_page_redraw",
         )
         combined = [
-            {"code": "TEXT_ERROR", "category": "text", "blocking": True},
-            {"code": "FACIAL_HAIR_DRIFT", "category": "visual", "blocking": True},
+            finding("TEXT_ERROR"),
+            finding("FACIAL_HAIR_DRIFT"),
         ]
         self.assertEqual(route_page_decision(combined, 0.95), "full_page_redraw")
         self.assertEqual(
@@ -302,7 +402,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
         )
 
     def test_confidence_boundaries_and_disagreement(self):
-        defect = [{"code": "FACIAL_HAIR_DRIFT", "category": "visual", "blocking": True}]
+        defect = [finding("FACIAL_HAIR_DRIFT")]
         self.assertEqual(route_page_decision([], 0.90), "unchanged")
         self.assertEqual(route_page_decision(defect, 0.899999), "second_review_required")
         self.assertEqual(route_page_decision(defect, 0.60), "second_review_required")
@@ -315,7 +415,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
     def test_unknown_code_cannot_silently_route_clean(self):
         self.assertEqual(
             route_page_decision(
-                [{"code": "SOMETHING_NEW", "category": "visual", "blocking": False}],
+                [finding("SOMETHING_NEW", blocking=False)],
                 1.0,
             ),
             "evidence_blocked",
@@ -323,13 +423,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
 
     def test_high_confidence_classification_disagreement_is_evidence_blocked(self):
         continuity = valid_audit(
-            findings=[
-                {
-                    "code": "FACIAL_HAIR_DRIFT",
-                    "category": "visual",
-                    "blocking": True,
-                }
-            ],
+            findings=[finding("FACIAL_HAIR_DRIFT")],
             classification="defect",
             classification_evidence=["beard differs from stable anchor"],
         )
@@ -340,18 +434,14 @@ class DualAuditAndRoutingTests(unittest.TestCase):
         self.assertTrue(result["perspective_disagreement"])
 
     def test_matching_finding_from_both_reviewers_is_confirmed_not_duplicate(self):
-        finding = {
-            "code": "STYLE_DRIFT",
-            "category": "visual",
-            "blocking": True,
-        }
+        shared_finding = finding("STYLE_DRIFT")
         continuity = valid_audit(
-            findings=[finding],
+            findings=[shared_finding],
             classification="defect",
             classification_evidence=["line work differs"],
         )
         source = self.source_audit(
-            findings=[finding],
+            findings=[shared_finding],
             classification="defect",
             classification_evidence=["line work differs"],
         )
@@ -364,6 +454,32 @@ class DualAuditAndRoutingTests(unittest.TestCase):
             ["continuity", "source"],
         )
 
+    def test_dual_finding_group_preserves_each_complete_report(self):
+        continuity_finding = finding("STYLE_DRIFT", region="panel-2")
+        source_finding = finding(
+            "STYLE_DRIFT",
+            region="panel-2",
+            finding_id="d" * 64,
+            evidence={"path": "evidence/source-panel-2.png", "sha256": "e" * 64},
+        )
+        continuity = valid_audit(
+            findings=[continuity_finding],
+            classification="defect",
+            classification_evidence=["continuity anchor mismatch"],
+        )
+        source = self.source_audit(
+            findings=[source_finding],
+            classification="defect",
+            classification_evidence=["source review independently confirms"],
+        )
+
+        result = aggregate_page_audits([continuity, source])
+
+        reports = result["finding_evidence"][0]["reports"]
+        self.assertEqual([row["perspective"] for row in reports], ["continuity", "source"])
+        self.assertEqual(reports[0]["finding"], continuity_finding)
+        self.assertEqual(reports[1]["finding"], source_finding)
+
     def test_any_blocked_audit_keeps_dual_aggregate_evidence_blocked(self):
         blocked = valid_audit(
             classification="evidence_blocked",
@@ -371,9 +487,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
         )
         unchanged = self.source_audit()
         defect = self.source_audit(
-            findings=[
-                {"code": "TEXT_ERROR", "category": "text", "blocking": True}
-            ],
+            findings=[finding("TEXT_ERROR")],
             classification="defect",
             classification_evidence=["source string differs"],
         )
@@ -388,7 +502,7 @@ class DualAuditAndRoutingTests(unittest.TestCase):
                 self.assertEqual(result["decision"], "evidence_blocked")
 
     def test_route_rejects_boolean_and_nonfinite_confidence_without_mutation(self):
-        findings = [{"code": "TEXT_ERROR", "category": "text", "blocking": True}]
+        findings = [finding("TEXT_ERROR")]
         original = copy.deepcopy(findings)
         for confidence in (True, math.inf):
             with self.subTest(confidence=confidence):
@@ -425,6 +539,90 @@ class AppendOnlyReviewLogTests(unittest.TestCase):
                 lines[0],
                 json.dumps(row1, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             )
+
+    def test_append_roundtrips_to_real_json_types_before_hash_and_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            event = {**self.event(1), "coordinates": (1, 2)}
+
+            row = append_review_event(path, event)
+
+            self.assertEqual(row["coordinates"], [1, 2])
+            self.assertEqual(validate_review_log(path)[0], row)
+
+    def test_four_processes_append_complete_continuous_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            processes = self._spawn_appenders(path, workers=4, events_per_worker=5)
+            self._assert_processes_succeed(processes)
+
+            rows = validate_review_log(path)
+
+            self.assertEqual(len(rows), 20)
+            self.assertEqual(len({row["event_hash"] for row in rows}), 20)
+            self.assertTrue(Path(str(path) + ".lock").is_file())
+
+    def test_injected_process_failure_does_not_damage_other_process_appends(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.jsonl"
+            processes = self._spawn_appenders(
+                path, workers=4, events_per_worker=4, include_failure=True
+            )
+            self._assert_processes_succeed(processes)
+
+            rows = validate_review_log(path)
+
+            self.assertEqual(len(rows), 16)
+            self.assertNotIn("injected-failure", {row["type"] for row in rows})
+
+    def _spawn_appenders(self, path, *, workers, events_per_worker, include_failure=False):
+        script = r'''
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from audit_evidence import append_review_event
+path = Path(sys.argv[2])
+worker = int(sys.argv[3])
+count = int(sys.argv[4])
+fail = sys.argv[5] == "1"
+if fail:
+    try:
+        append_review_event(path, {"type": "injected-failure", "page": "scene/fail.jpg", "evidence_hash": "f" * 64}, _fault_after_write=True)
+    except OSError:
+        pass
+else:
+    for index in range(count):
+        value = worker * 100 + index
+        append_review_event(path, {"type": "page_audit_recorded", "page": f"scene/{worker}-{index}.jpg", "evidence_hash": f"{value:064x}"})
+'''
+        scripts_dir = str(ROOT / "scripts")
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", script, scripts_dir, str(path), str(worker), str(events_per_worker), "0"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for worker in range(workers)
+        ]
+        if include_failure:
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", script, scripts_dir, str(path), "99", "0", "1"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        return processes
+
+    def _assert_processes_succeed(self, processes):
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            results.append((process.returncode, stdout, stderr))
+        failures = [result for result in results if result[0] != 0]
+        self.assertFalse(failures, repr(failures))
 
     def test_validation_rejects_tamper_truncation_blank_and_malformed_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
