@@ -14,7 +14,7 @@ class ReleaseVersionContractTests(unittest.TestCase):
         self.assertIn('EVIDENCE_PIPELINE_ID = "continuity_v4"', version)
         self.assertIn('EVIDENCE_SCHEMA_VERSION = "4.0"', version)
         self.assertIn(
-            'RELEASE_CERTIFICATE_ID = "continuity-v5.1-signed-20260715"',
+            'RELEASE_CERTIFICATE_ID = "continuity-v5.2-signed-20260715"',
             version,
         )
 

@@ -20,6 +20,7 @@ TRAITS = (
     "body_build",
 )
 OBSERVATION_STATES = {"match", "drift", "not_visible"}
+MATRIX_STATES = {"confirmed", "defects_confirmed", "evidence_blocked"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -59,8 +60,10 @@ def validate_matrix(value):
     if result.get("version") != 1:
         raise ValueError("version must be 1")
     status = result.get("status")
-    if status not in {"confirmed", "evidence_blocked"}:
-        raise ValueError("status must be confirmed or evidence_blocked")
+    if status not in MATRIX_STATES:
+        raise ValueError(
+            "status must be confirmed, defects_confirmed, or evidence_blocked"
+        )
     result["cluster_id"] = _text(result.get("cluster_id"), "cluster_id")
     pages = result.get("cluster_pages")
     if (
@@ -117,6 +120,7 @@ def validate_matrix(value):
                 raise ValueError(f"{entity_id} {page} present must be boolean")
             if observation.get("full_resolution") is not True:
                 raise ValueError(f"{entity_id} {page} requires full_resolution=true")
+            drift_traits = []
             for trait in TRAITS:
                 trait_status = observation.get(trait)
                 if trait_status not in OBSERVATION_STATES:
@@ -127,8 +131,34 @@ def validate_matrix(value):
                     raise ValueError(f"absent observation must mark {trait} not_visible")
                 if trait_status == "drift":
                     has_drift = True
+                    drift_traits.append(trait)
                     if status == "confirmed":
                         raise ValueError(f"{entity_id} {page} {trait} drift blocks confirmation")
+            defect_review = observation.get("defect_review")
+            if drift_traits and status == "defects_confirmed":
+                if not isinstance(defect_review, Mapping):
+                    raise ValueError(f"{entity_id} {page} confirmed drift requires defect_review")
+                if set(defect_review) != {"decision", "traits", "reviewer_ids", "reason"}:
+                    raise ValueError(f"{entity_id} {page} defect_review contract is invalid")
+                if defect_review.get("decision") != "confirmed_defect":
+                    raise ValueError(f"{entity_id} {page} defect_review decision is invalid")
+                traits = defect_review.get("traits")
+                if not isinstance(traits, Sequence) or isinstance(traits, (str, bytes)):
+                    raise ValueError(f"{entity_id} {page} defect_review traits are invalid")
+                if set(traits) != set(drift_traits) or len(traits) != len(drift_traits):
+                    raise ValueError(f"{entity_id} {page} defect_review must cover drift traits")
+                reviewers = defect_review.get("reviewer_ids")
+                if (
+                    not isinstance(reviewers, Sequence)
+                    or isinstance(reviewers, (str, bytes))
+                    or len({_text(item, "independent reviewer id") for item in reviewers}) < 2
+                ):
+                    raise ValueError(
+                        f"{entity_id} {page} requires two independent reviewer ids"
+                    )
+                _text(defect_review.get("reason"), f"{entity_id} {page} defect_review.reason")
+            elif defect_review is not None and not drift_traits:
+                raise ValueError(f"{entity_id} {page} defect_review requires drift")
             observation["lighting_explanation"] = _text(
                 observation.get("lighting_explanation"),
                 f"{entity_id} {page} lighting_explanation",
@@ -142,11 +172,17 @@ def validate_matrix(value):
             raise ValueError(f"{entity_id} observations must exactly cover cluster_pages in order")
         if row["status"] == "passed" and has_drift:
             raise ValueError(f"{entity_id} passed status cannot contain drift")
+        if status == "defects_confirmed" and has_drift and row["status"] != "defect":
+            raise ValueError(f"{entity_id} confirmed drift requires defect status")
         if status == "confirmed" and row["status"] != "passed":
             raise ValueError(f"{entity_id} defect blocks confirmed matrix")
         row["observations"] = normalized_observations
         normalized_characters.append(row)
     result["characters"] = normalized_characters
+    if status == "defects_confirmed" and not any(
+        row["status"] == "defect" for row in normalized_characters
+    ):
+        raise ValueError("defects_confirmed matrix requires at least one defect")
     return result
 
 

@@ -14,16 +14,16 @@
                    "path":  "assets/release_evidence/golden_text_detection_v2.json",
                    "sha256":  "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
                },
-    "issued_at":  "2026-07-15T20:30:00+08:00",
-    "key_id":  "rcc-v5-8b27bb801096212883696494",
+    "issued_at":  "2026-07-15T23:50:00+08:00",
+    "key_id":  "rcc-v5-197b0529fbf361d4a388d025",
     "pipeline_id":  "continuity_v5_unified",
-    "release_id":  "continuity-v5.1-signed-20260715",
+    "release_id":  "continuity-v5.2-signed-20260715",
     "runtime_manifest":  {
                              "path":  "assets/release_evidence/runtime_manifest.json",
-                             "sha256":  "45b5312fac7e9160877f8f5862acf26fec108d638c89a627994cdaf5d786a863"
+                             "sha256":  "6a93bb7dd6820bfa9b782aba3b78520bc97cc511c57f9b93ccf49d1245a22f3b"
                          },
     "schema_version":  "1.0",
     "scope":  "generic_detection_benchmark",
     "signature_algorithm":  "rsa-pkcs1v15-sha256",
-    "signature":  "vG55GCVkRjG15fS7LansgxwxBnGeXS7TgLazFNFP/T0iamuanmLYhgfm5zy/BS6WUdvRXiqNvfXyL5cqvfAHB8D9sE0FAD6Trg36OI5JoHP9fPDTVh6izx3SSC9HoO5331sL44DvvlWYO49KOrag1sZ5kaG6p4g/1LYulGHtjf+Qzd6xuLk93spmNOKbf4/1UT1I2w2VK1RUv3Qq/dZ5bcrqmS6Mw6s5M1Vtu5Z7DAfp3EkxUqJ18WpMTc62A3x+Du1ETjBkx34nhPcUVtYgdf/OcLwYLrsflW09LAEgQquybsjY3CnBpnAQDCEaw61rEOB8DtwGYeBByYPg6Jk3EszDAOH5H6rfKG9Lc8j5vCLyOnRnwDRnTLW1oi68jESMvwCjio+iUQHzmabnUclpX8ixluEbdYmWD6R+20sA2nf4nNS66F/vyXHuWXtiW6QbVpxhaLLCcj5bOmnjeETM2qTdPpYBPBASkIpob4OdjFY++Jf1xfrLE7GpLzVeAtGC"
+    "signature":  "UhU4iQFPVxXzqjW4tx1bATCfYPMD6uzqLoT+PLs7w9C5oUVEGPLZTXcMTJgqYNUNdy+qUraG1yiQ9mSXEslJLUefsCHYH+iQY+yEf1u/xELNqqLMJu00RaGv656Z/206nztLmLyFGM3IS9Ymo7jAcS0cs4JcJ7lpBZT4Bmn+AL0Bx/QIBKo6mx2P5PjGqrY+5KSw0WRWqhwhmx/eopF1GxpKqyWaK+KdzEk/uYuxWXytEZvHIIDgv2Yoqa11wWMSSWtfXzUOQNDzWJYSCqAa8IrPb1LiacPE0URoFvk7TPrwkTLc574IbceeB5uYkR40urIlceKx7NJ/vHwASFuukOvdsP4p+E8z0GB7vV8c5lziGhlo8meOqRkEZF9g7sRpQFP+ESFgron/pR30Y8teebeSYyE2R+9aEf3F4W00ASXQuqI6fEmggg/1YX/S87id6i425OwAwVrFBQ/A53hY2Dyl/pdw059gjrSZ8aQCAFe7XUgYnqLxPRjnnvIw81zs"
 }

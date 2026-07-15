@@ -84,3 +84,39 @@ class AppearanceMatrixTests(unittest.TestCase):
         row["skin_tone"] = "not_visible"
         with self.assertRaisesRegex(ValueError, "present observation"):
             validate_matrix(matrix)
+
+    def test_dual_reviewed_source_drift_can_enter_the_redraw_queue(self):
+        matrix = valid_matrix()
+        matrix["status"] = "defects_confirmed"
+        character = matrix["characters"][0]
+        character["status"] = "defect"
+        observation = character["observations"][0]
+        observation["facial_hair"] = "drift"
+        observation["defect_review"] = {
+            "decision": "confirmed_defect",
+            "traits": ["facial_hair"],
+            "reviewer_ids": ["visual-a", "blind-c"],
+            "reason": "full-resolution independent reviews agree on beard drift",
+        }
+
+        result = validate_matrix(matrix)
+
+        self.assertEqual(result["status"], "defects_confirmed")
+        self.assertEqual(result["characters"][0]["status"], "defect")
+
+    def test_confirmed_source_drift_requires_two_independent_reviewers(self):
+        matrix = valid_matrix()
+        matrix["status"] = "defects_confirmed"
+        character = matrix["characters"][0]
+        character["status"] = "defect"
+        observation = character["observations"][0]
+        observation["facial_hair"] = "drift"
+        observation["defect_review"] = {
+            "decision": "confirmed_defect",
+            "traits": ["facial_hair"],
+            "reviewer_ids": ["same-reviewer", "same-reviewer"],
+            "reason": "not independent",
+        }
+
+        with self.assertRaisesRegex(ValueError, "independent reviewer"):
+            validate_matrix(matrix)

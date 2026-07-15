@@ -1,11 +1,11 @@
 {
     "schema_version":  "1.0",
-    "release_id":  "continuity-v5.1-signed-20260715",
+    "release_id":  "continuity-v5.2-signed-20260715",
     "scope":  "generic_detection_control_plane",
     "files":  [
                   {
                       "path":  "SKILL.md",
-                      "sha256":  "fc37e2ee91c2a7cd489cea0788a2e4444808990ea8a4c1eb8ac4c270414f099c"
+                      "sha256":  "e704d10d358b53c125bd4d820c887432a2be3ad08432bad10122cdd33e81302a"
                   },
                   {
                       "path":  "agents/openai.yaml",
@@ -21,7 +21,7 @@
                   },
                   {
                       "path":  "references/continuity-rules.md",
-                      "sha256":  "21b96fd3b58e0f1077c5a1dc59ce1f3445f4aea9a3c8d97b8ab0922297a72da7"
+                      "sha256":  "65daf4341710c47315748392f322d0acbc5d369c8a58737fe70d40e5f062bef7"
                   },
                   {
                       "path":  "references/failure-learning.md",
@@ -41,7 +41,7 @@
                   },
                   {
                       "path":  "scripts/pipeline_version.py",
-                      "sha256":  "440009a9fa6a49e937f0457c1879cee365591223a5fbb12b0ea4ad8a3e304800"
+                      "sha256":  "b769c6b965b3fadd3731ae55972cf21608e5dfecb700f006bec9c39fe8391b6f"
                   },
                   {
                       "path":  "scripts/release_gate.py",
@@ -49,11 +49,11 @@
                   },
                   {
                       "path":  "scripts/validate_appearance_matrix.py",
-                      "sha256":  "4c33debcae54fa8ea88afa3c7baa3cac7397f0d5f24331f8a8b71c8306e70c73"
+                      "sha256":  "6e84f7948c2b7972b0f3e2cb3c8b5131cb985501d3cf57151a8bce78e5ac97a6"
                   },
                   {
                       "path":  "scripts/validate_audit.py",
-                      "sha256":  "a86b3be6865b72d3f323289c5edc9834c19df2136a8dac947cbff6a34318abd8"
+                      "sha256":  "63d7e42d0eada2954da3a7731b0e076944be433a355c84105ded46db8a39bef3"
                   },
                   {
                       "path":  "scripts/validate_detection_benchmark.py",

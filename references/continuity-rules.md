@@ -18,6 +18,8 @@ Before page classification, build one `character_appearance_matrix.json` per sem
 
 Use the character reference as the identity baseline. Water, shadow, mood lighting, and watercolor texture may shift local color, but they do not justify a change of skin-tone category or undertone across one continuous scene. Record a concrete lighting explanation for every observation. A visible character cannot use `not_visible`; an unobserved page, missing reference, missing crop evidence, or any unresolved drift blocks confirmation and page promotion.
 
+When two independent full-resolution reviewers agree that a source-page drift is a real repair target, record `defects_confirmed` plus a `confirmed_defect` review covering the exact drift traits and both reviewer identities. This permits classification into `full_page_redraw`; it never permits final release. A repaired candidate must produce a clean `confirmed` matrix before promotion.
+
 ## Clothing, props, extras, and scenes
 
 For clothing and props, use `present`, `absent`, or `unknown`, plus owner, material, appearance, and condition when known. Add or remove an item only when story state supports it. Track recurring extras with stable identity even without a character sheet.

@@ -138,6 +138,18 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
                 self.assertIn(phrase, skill)
         self.assertIn("never bypasses project-specific audit gates", skill)
 
+    def test_confirmed_source_defects_can_reach_redraw_without_weakening_release(self):
+        skill = read("SKILL.md")
+        for phrase in (
+            "defects_confirmed",
+            "two independent full-resolution reviewers",
+            "eligible for `full_page_redraw` classification",
+            "release still requires a `confirmed` appearance matrix",
+            "every per-page source text audit",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
     def test_production_promotion_and_release_are_machine_gated(self):
         skill = read("SKILL.md")
         for phrase in (

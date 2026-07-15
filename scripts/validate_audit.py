@@ -9,6 +9,8 @@ from typing import Any
 
 from entity_timeline import validate_timeline
 from pipeline_contracts import canonical_hash
+from validate_appearance_matrix import validate_matrix
+from validate_source_text_audit import validate_source_text_audit
 from project_common import (
     INPUT_PAGE_EXTENSIONS,
     discover_project,
@@ -80,6 +82,18 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
     timeline = _load_json(evidence / "entity_state_timeline.json")
     audits = _load_json(evidence / "page_audit.json")
     queue = _load_json(evidence / "task_queue.json")
+    matrix_path = evidence / "character_appearance_matrix.json"
+    if not matrix_path.is_file():
+        raise ValueError("audit-only appearance matrix is missing")
+    try:
+        appearance_matrix = validate_matrix(_load_json(matrix_path))
+    except ValueError as exc:
+        raise ValueError(f"audit-only appearance matrix is invalid: {exc}") from exc
+    if (
+        appearance_matrix.get("status") not in {"confirmed", "defects_confirmed"}
+        or appearance_matrix.get("cluster_pages") != input_names
+    ):
+        raise ValueError("audit-only appearance matrix coverage is incomplete")
     for label, document in (
         ("scene_clusters", clusters),
         ("style_reference_packs", packs),
@@ -139,6 +153,20 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
         elif decision not in FINAL_AUDIT_DECISIONS:
             raise ValueError(f"audit-only final page classification is missing: {page}")
 
+        source_audit_path = evidence / "source_text_audit" / f"{page}.json"
+        if not source_audit_path.is_file():
+            raise ValueError(f"audit-only source text audit is missing: {page}")
+        try:
+            source_audit = validate_source_text_audit(
+                _load_json(source_audit_path), project.root
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"audit-only source text audit is invalid for {page}: {exc}"
+            ) from exc
+        if source_audit.get("status") != "confirmed":
+            raise ValueError(f"audit-only source text audit is incomplete: {page}")
+
     repair_completions = [
         task for task in queue.get("tasks", [])
         if isinstance(task, dict)
@@ -153,6 +181,8 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
         "candidate_count": 0,
         "promoted_output_count": 0,
         "second_review_count": second_reviews,
+        "appearance_matrix_status": appearance_matrix["status"],
+        "source_text_audit_count": len(input_names),
     }
 
 

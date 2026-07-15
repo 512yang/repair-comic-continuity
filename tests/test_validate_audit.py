@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -50,6 +51,84 @@ class AuditOnlyValidationTests(unittest.TestCase):
         )
         timeline["status"] = "passed"
         write_registry(self.evidence / "entity_state_timeline.json", timeline)
+        matrix = {
+            "version": 1,
+            "status": "confirmed",
+            "cluster_id": "c1",
+            "cluster_pages": ["189.jpg"],
+            "characters": [{
+                "entity_id": "hero",
+                "reference": self.artifact(self.root / "人物参考图" / "hero.png"),
+                "baseline": {
+                    "skin_tone": "gray fixture",
+                    "hair": "black",
+                    "facial_hair": "none",
+                    "clothing": "fixture robe",
+                    "face_shape": "fixture face",
+                    "body_build": "fixture build",
+                },
+                "status": "passed",
+                "observations": [{
+                    "page": "189.jpg",
+                    "present": True,
+                    "full_resolution": True,
+                    "skin_tone": "match",
+                    "hair": "match",
+                    "facial_hair": "match",
+                    "clothing": "match",
+                    "face_shape": "match",
+                    "body_build": "match",
+                    "lighting_explanation": "uniform fixture lighting",
+                    "evidence": self.artifact(self.root / "输入" / "189.jpg"),
+                }],
+            }],
+        }
+        (self.evidence / "character_appearance_matrix.json").write_text(
+            json.dumps(matrix, ensure_ascii=False), encoding="utf-8"
+        )
+        crop_dir = self.evidence / "source_text_crops"
+        crop_dir.mkdir()
+        crop = crop_dir / "189-b1.png"
+        with Image.open(self.root / "输入" / "189.jpg") as page_image:
+            page_image.crop((0, 0, 32, 48)).save(crop)
+        source_audit_dir = self.evidence / "source_text_audit"
+        source_audit_dir.mkdir()
+        block_ref = {
+            "block_id": "189-b1",
+            "bbox": [0, 0, 32, 48],
+            "transcription": "测试正文",
+        }
+        source_audit = {
+            "version": 1,
+            "status": "confirmed",
+            "page": self.artifact(self.root / "输入" / "189.jpg"),
+            "novel": self.artifact(self.root / "小说.txt"),
+            "machine_detector_id": "fixture-machine",
+            "visual_reviewer_id": "fixture-independent-reviewer",
+            "source_has_ordinary_text": True,
+            "textless_review": None,
+            "machine_blocks": [block_ref],
+            "visual_blocks": [block_ref],
+            "blocks": [{
+                **block_ref,
+                "crop": self.artifact(crop),
+                "decision": "passed",
+                "reason": "full-resolution fixture inspected",
+                "novel_alignment": {
+                    "status": "confirmed",
+                    "start": 5,
+                    "end": 9,
+                    "excerpt": "测试正文",
+                    "semantic_decision": "faithful",
+                    "reason": "exact fixture excerpt",
+                },
+                "repeat_reviews": [],
+                "glyph_checks": [],
+            }],
+        }
+        (source_audit_dir / "189.jpg.json").write_text(
+            json.dumps(source_audit, ensure_ascii=False), encoding="utf-8"
+        )
         write_registry(
             self.evidence / "page_audit.json",
             {
@@ -76,6 +155,12 @@ class AuditOnlyValidationTests(unittest.TestCase):
     def tree_bytes(self):
         return {path.relative_to(self.root).as_posix(): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
 
+    def artifact(self, path):
+        return {
+            "path": path.relative_to(self.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
     def test_audit_only_accepts_complete_audits_without_candidates(self):
         before = self.tree_bytes()
         result = validate_audit_project(self.root, self.evidence)
@@ -101,6 +186,19 @@ class AuditOnlyValidationTests(unittest.TestCase):
         document["pages"][0]["decision"] = "second_review_required"
         write_registry(path, document)
         with self.assertRaisesRegex(ValueError, "second review"):
+            validate_audit_project(self.root, self.evidence)
+
+    def test_audit_only_requires_appearance_and_source_text_gates(self):
+        matrix = self.evidence / "character_appearance_matrix.json"
+        matrix_bytes = matrix.read_bytes()
+        matrix.unlink()
+        with self.assertRaisesRegex(ValueError, "appearance matrix"):
+            validate_audit_project(self.root, self.evidence)
+        matrix.write_bytes(matrix_bytes)
+
+        source_audit = self.evidence / "source_text_audit" / "189.jpg.json"
+        source_audit.unlink()
+        with self.assertRaisesRegex(ValueError, "source text audit"):
             validate_audit_project(self.root, self.evidence)
 
 

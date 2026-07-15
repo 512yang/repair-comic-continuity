@@ -66,7 +66,7 @@ Use one coordinator and at most 3 workers. Each worker holds one durable lease a
 
 Only pages with confirmed visual defects enter image generation. Correct pages still receive text and continuity checks but do not consume a generation call.
 
-Run `python scripts/validate_appearance_matrix.py evidence/character_appearance_matrix.json` before classifying any page. A missing character page, missing identity reference, non-full-resolution observation, `not_visible` trait on a visible character, or unexplained trait drift blocks confirmation. Do not excuse a same-scene skin-tone category change as lighting without explicit full-resolution evidence. Reject generated candidates that reintroduce a drift already recorded in the matrix.
+Run `python scripts/validate_appearance_matrix.py evidence/character_appearance_matrix.json` before classifying any page. A missing character page, missing identity reference, non-full-resolution observation, `not_visible` trait on a visible character, or unexplained trait drift blocks confirmation. A source matrix may use `defects_confirmed` only when two independent full-resolution reviewers agree, every drift trait has a hash-bound `confirmed_defect` review, and the affected page is eligible for `full_page_redraw` classification. This state authorizes a repair task, not release: release still requires a `confirmed` appearance matrix with every repaired trait matching. Do not excuse a same-scene skin-tone category change as lighting without explicit full-resolution evidence. Reject generated candidates that reintroduce a drift already recorded in the matrix.
 
 Run `python scripts/validate_source_text_audit.py evidence/source_text_audit/<page>.json --root <run-root>` before classifying each page. The release manifest must bind that confirmed audit to the exact sealed source page. A worker's prose claim that it inspected every block is not evidence and cannot satisfy this gate.
 
@@ -80,7 +80,7 @@ A learned rule becomes effective only when positive regression, clean-control, v
 
 ## Audit-only gate
 
-Use `scripts/validate_audit.py` when the requested phase is inspection only. It requires confirmed alignment, semantic clusters, role-complete reference packs, valid entity timelines, full-resolution page audits, required second reviews, and final page classifications. It rejects candidate images, completed repair tasks, and any final output image.
+Use `scripts/validate_audit.py` when the requested phase is inspection only. It requires confirmed alignment, semantic clusters, role-complete reference packs, valid entity timelines, a validated appearance matrix, every per-page source text audit, full-resolution page audits, required second reviews, and final page classifications. It rejects candidate images, completed repair tasks, and any final output image.
 
 V3 migration output is diagnostic only. It cannot synthesize V4 audits, timelines, reference coverage, pass states, or final images, even with a confirmation token. Rebuild V4 evidence from immutable source hashes.
 
