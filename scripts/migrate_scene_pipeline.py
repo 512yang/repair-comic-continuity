@@ -1335,6 +1335,9 @@ def migrate_project(
     report_body = {
         "schema_version": SCHEMA_VERSION,
         "proposal_only": True,
+        "diagnostic_only": True,
+        "v4_rebuild_required": True,
+        "v4_evidence_state": "unresolved_until_fresh_audits",
         "prepared_by": prepared_by,
         "generated_at": generated_at,
         "project_root": str(project.root),
@@ -2095,8 +2098,15 @@ def apply_project(
     interrupt_after_backup_dir_creation: bool = False,
     interrupt_after_first_backup_copy: bool = False,
     interrupt_after_stage_dir_creation: bool = False,
+    target_pipeline: str = "legacy_scene_cluster_v3",
 ) -> dict[str, Any]:
     """Transactionally apply an independently verified dry-run proposal."""
+    if target_pipeline == "continuity_v4":
+        raise ValueError(
+            "diagnostic-only V3 evidence cannot be applied as V4; rebuild from immutable source hashes and complete fresh V4 audits"
+        )
+    if target_pipeline != "legacy_scene_cluster_v3":
+        raise ValueError("unsupported migration target_pipeline")
     recover_interrupted_migration(project_root)
     if confirm_token != APPLY_CONFIRM_TOKEN:
         raise ValueError("apply requires the exact confirm token")
@@ -2321,6 +2331,7 @@ def main(argv: list[str] | None = None) -> int:
                 expected_migration_id=args.migration_id,
                 confirm_token=args.confirm_token,
                 review_file=args.review_file,
+                target_pipeline="continuity_v4",
             )
         else:
             result = migrate_project(

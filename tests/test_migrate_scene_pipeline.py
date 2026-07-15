@@ -180,6 +180,24 @@ def _make_project(
 
 
 class MigrationDryRunTests(unittest.TestCase):
+    def test_v3_proposal_is_diagnostic_only_and_cannot_apply_as_v4(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_project(Path(tmp) / "project")
+            result = migrate_project(root, now=FIXED_NOW)
+            report = result["report"]
+            self.assertTrue(report["diagnostic_only"])
+            self.assertTrue(report["v4_rebuild_required"])
+            self.assertEqual(report["v4_evidence_state"], "unresolved_until_fresh_audits")
+            self.assertEqual(result["artifacts"]["comic_run_manifest.json"]["status"], "inventoried")
+            with self.assertRaisesRegex(ValueError, "diagnostic-only V3 evidence"):
+                apply_project(
+                    root,
+                    proposal_dir=root / "missing-proposal",
+                    expected_migration_id="not-applicable",
+                    confirm_token=APPLY_CONFIRM_TOKEN,
+                    target_pipeline="continuity_v4",
+                )
+
     def test_output_audit_counts_supported_extensions_recursively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_project(Path(tmp) / "project")
