@@ -1340,8 +1340,50 @@ def _review_artifacts(
             if digest != report["hashes"]["candidate"] or metrics["size"] != source_size:
                 raise ValueError("candidate review artifact must be exact current full-size candidate")
         elif kind == "full_resolution_comparison":
-            if metrics["size"][0] < source_size[0] * 2 or metrics["size"][1] < source_size[1]:
-                raise ValueError("comparison review artifact is not a full-size side-by-side image")
+            expected_comparison_size = [source_size[0] * 2, source_size[1]]
+            if metrics["size"] != expected_comparison_size:
+                raise ValueError("comparison review artifact must be exact two-up full-size dimensions")
+            try:
+                with (
+                    Image.open(path) as comparison_source,
+                    Image.open(report["paths"]["original"]) as original_source,
+                    Image.open(report["paths"]["candidate"]) as candidate_source,
+                ):
+                    comparison_source.load()
+                    original_source.load()
+                    candidate_source.load()
+                    with (
+                        comparison_source.convert("RGBA") as comparison_rgba,
+                        original_source.convert("RGBA") as original_rgba,
+                        candidate_source.convert("RGBA") as candidate_rgba,
+                    ):
+                        with comparison_rgba.crop(
+                            (0, 0, source_size[0], source_size[1])
+                        ) as left_half, comparison_rgba.crop(
+                            (source_size[0], 0, source_size[0] * 2, source_size[1])
+                        ) as right_half:
+                            left_matches = (
+                                all(
+                                    band.getbbox() is None
+                                    for band in ImageChops.difference(
+                                        left_half, original_rgba
+                                    ).split()
+                                )
+                            )
+                            right_matches = (
+                                all(
+                                    band.getbbox() is None
+                                    for band in ImageChops.difference(
+                                        right_half, candidate_rgba
+                                    ).split()
+                                )
+                            )
+            except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+                raise ValueError("comparison review artifact cannot be canonically decoded") from exc
+            if not left_matches or not right_matches:
+                raise ValueError(
+                    "comparison review artifact must be exact source-left candidate-right pixels"
+                )
         else:
             raise ValueError("review artifact kind is invalid")
         result.append(

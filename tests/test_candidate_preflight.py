@@ -168,6 +168,70 @@ class CandidatePreflightTests(unittest.TestCase):
             "created_at": created_at,
         }
 
+    def write_comparison(self, original, candidate, path, *, swapped=False, stale=None, blank=False):
+        with Image.open(original) as source, Image.open(candidate) as current:
+            left = current if swapped else source
+            right = source if swapped else current
+            if stale is not None:
+                right = Image.open(stale)
+            try:
+                board = Image.new("RGBA", (source.width * 2, source.height), (255, 255, 255, 255))
+                if not blank:
+                    board.paste(left.convert("RGBA"), (0, 0))
+                    board.paste(right.convert("RGBA"), (source.width, 0))
+                board.save(path)
+            finally:
+                if stale is not None:
+                    right.close()
+        return path
+
+    def make_full_redraw_report(self):
+        module = candidate_preflight()
+        original, candidate, _, _, _ = self.make_task7_text_candidate()
+        topology = self.root / "panel-topology.png"
+        Image.new("RGB", (256, 256), "white").save(topology)
+        request_path = self.root / "textless-request.json"
+        request_path.write_text(
+            '{"source_page_sha256":"%s","target_composition_sha256":"%s","textless":true}'
+            % (sha256(original), sha256(original)),
+            encoding="utf-8",
+        )
+        redraw_evidence = {
+            "source_page_sha256": sha256(original),
+            "candidate_sha256": sha256(candidate),
+            "candidate_stage": "textless",
+            "source_has_ordinary_text": False,
+            "panel_topology": {
+                "path": str(topology),
+                "sha256": sha256(topology),
+                "kind": "panel_topology",
+                "source_page_sha256": sha256(original),
+                "candidate_sha256": sha256(candidate),
+            },
+            "target_composition": {
+                "path": str(original),
+                "sha256": sha256(original),
+                "kind": "target_composition",
+                "source_page_sha256": sha256(original),
+            },
+            "textless_request": {
+                "path": str(request_path),
+                "sha256": sha256(request_path),
+                "kind": "textless_redraw_request",
+                "source_page_sha256": sha256(original),
+            },
+        }
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="full_page_redraw",
+            candidate_stage="textless",
+            text_policy="textless",
+            ocr_metadata=VALID_OCR,
+            redraw_evidence=redraw_evidence,
+        )
+        return original, candidate, report
+
     def test_complete_task7_request_is_required_instead_of_self_signed_subset(self):
         module = candidate_preflight()
         original, candidate, mask, spec, request = self.make_task7_text_candidate()
@@ -323,7 +387,7 @@ class CandidatePreflightTests(unittest.TestCase):
             self.candidate, self.original, page_class="unchanged"
         )
         comparison = self.root / "comparison.png"
-        Image.new("RGB", (1792, 1200), "white").save(comparison)
+        self.write_comparison(self.original, self.candidate, comparison)
         artifacts = [
             self.review_artifact(self.original, report, "full_resolution_original"),
             self.review_artifact(self.candidate, report, "full_resolution_candidate"),
@@ -348,55 +412,9 @@ class CandidatePreflightTests(unittest.TestCase):
 
     def test_full_page_redraw_accepts_only_real_full_size_three_board_review(self):
         module = candidate_preflight()
-        original, candidate, _, _, _ = self.make_task7_text_candidate()
-        topology = self.root / "panel-topology.png"
-        Image.new("RGB", (256, 256), "white").save(topology)
-        request_path = self.root / "textless-request.json"
-        request_path.write_text(
-            '{"source_page_sha256":"%s","target_composition_sha256":"%s","textless":true}'
-            % (sha256(original), sha256(original)),
-            encoding="utf-8",
-        )
-        redraw_evidence = {
-            "source_page_sha256": sha256(original),
-            "candidate_sha256": sha256(candidate),
-            "candidate_stage": "textless",
-            "source_has_ordinary_text": False,
-            "panel_topology": {
-                "path": str(topology),
-                "sha256": sha256(topology),
-                "kind": "panel_topology",
-                "source_page_sha256": sha256(original),
-                "candidate_sha256": sha256(candidate),
-            },
-            "target_composition": {
-                "path": str(original),
-                "sha256": sha256(original),
-                "kind": "target_composition",
-                "source_page_sha256": sha256(original),
-            },
-            "textless_request": {
-                "path": str(request_path),
-                "sha256": sha256(request_path),
-                "kind": "textless_redraw_request",
-                "source_page_sha256": sha256(original),
-            },
-        }
-        report = module.run_candidate_preflight(
-            candidate,
-            original,
-            page_class="full_page_redraw",
-            candidate_stage="textless",
-            text_policy="textless",
-            ocr_metadata=VALID_OCR,
-            redraw_evidence=redraw_evidence,
-        )
+        original, candidate, report = self.make_full_redraw_report()
         comparison = self.root / "redraw-comparison.png"
-        with Image.open(original) as left, Image.open(candidate) as right:
-            board = Image.new("RGB", (512, 256), "white")
-            board.paste(left.convert("RGB"), (0, 0))
-            board.paste(right.convert("RGB"), (256, 0))
-            board.save(comparison)
+        self.write_comparison(original, candidate, comparison)
         review = module.record_independent_review(
             report,
             "redraw-worker-1",
@@ -415,6 +433,49 @@ class CandidatePreflightTests(unittest.TestCase):
             check_matrix={name: True for name in module.REVIEW_MATRIX_CHECKS},
         )
         self.assertTrue(module.candidate_is_finally_eligible(report, review))
+
+    def test_comparison_board_rejects_blank_stale_and_swapped_halves(self):
+        module = candidate_preflight()
+        original, candidate, report = self.make_full_redraw_report()
+        stale = self.root / "stale.png"
+        Image.new("RGB", (256, 256), (1, 2, 3)).save(stale)
+        variants = {
+            "blank": self.write_comparison(
+                original, candidate, self.root / "blank-board.png", blank=True
+            ),
+            "stale": self.write_comparison(
+                original,
+                candidate,
+                self.root / "stale-board.png",
+                stale=stale,
+            ),
+            "swapped": self.write_comparison(
+                original,
+                candidate,
+                self.root / "swapped-board.png",
+                swapped=True,
+            ),
+        }
+        for name, comparison in variants.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "comparison"):
+                    module.record_independent_review(
+                        report,
+                        "redraw-worker-1",
+                        "reviewer-2",
+                        "accepted",
+                        "2026-07-14T20:00:00+00:00",
+                        candidate_created_at="2026-07-14T19:00:00+00:00",
+                        review_artifacts=[
+                            self.review_artifact(original, report, "full_resolution_original"),
+                            self.review_artifact(candidate, report, "full_resolution_candidate"),
+                            self.review_artifact(comparison, report, "full_resolution_comparison"),
+                        ],
+                        blind=True,
+                        inspected_panels=["panel-1"],
+                        inspected_entities=["hero"],
+                        check_matrix={name: True for name in module.REVIEW_MATRIX_CHECKS},
+                    )
 
     def test_text_only_candidate_rejects_pixels_changed_outside_mask(self):
         module = candidate_preflight()
