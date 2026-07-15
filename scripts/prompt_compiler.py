@@ -773,9 +773,9 @@ def _image_path(value: object, name: str) -> str:
         normalize_relative_image_path(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a safe relative image path") from exc
-    # Validation uses the contract's normalized identity, while the request keeps
-    # the exact Unicode spelling needed to reopen and reproduce the source path.
-    return unicodedata.normalize("NFC", raw)
+    # Separator normalization is structural. Unicode code points are source
+    # identity and must remain byte-for-byte reproducible (including legal NFD).
+    return raw
 
 
 def _data_path(value: object, name: str) -> str:
@@ -866,6 +866,29 @@ def _normalize_v4_redraw_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     raw_references = source["references"]
     if not isinstance(raw_references, list):
         raise ValueError("references must be a list")
+    raw_target_rows = [
+        row
+        for row in raw_references
+        if isinstance(row, Mapping) and row.get("role") == "target_composition"
+    ]
+    if len(raw_target_rows) != 1:
+        raise ValueError("V4 redraw requires exactly one target_composition")
+    raw_target = raw_target_rows[0]
+    raw_target_path = _image_path(
+        raw_target.get("path"), "target_composition.path"
+    )
+    raw_target_subject = raw_target.get("subject")
+    if (
+        raw_target.get("source") != "immutable_input"
+        or raw_target_path != source_page["path"]
+        or not isinstance(raw_target_subject, str)
+        or raw_target_subject != source_page["path"]
+        or _sha256(raw_target.get("sha256"), "target_composition.sha256")
+        != source_page["sha256"]
+    ):
+        raise ValueError(
+            "exact target_composition path, subject, source, and sha256 must match source_page"
+        )
     raw_stable_pages = source["stable_pages"]
     if not isinstance(raw_stable_pages, list):
         raise ValueError("stable_pages must be a list")

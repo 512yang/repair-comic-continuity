@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import importlib
+import json
 import re
 import sys
 import unittest
@@ -912,6 +913,34 @@ class V4FullPageRedrawCompilerTests(unittest.TestCase):
         self.assertIn("ROLE=identity_only", first["compiled_prompt"])
         self.assertIn("identity only", first["compiled_prompt"])
         self.assertIn("does not provide art style", first["compiled_prompt"])
+
+    def test_v4_preserves_exact_nfd_target_path_and_rejects_nfc_alias(self):
+        module = prompt_compiler()
+        nfd_path = "cafe\u0301/0252(1).png"
+        nfc_path = "caf\u00e9/0252(1).png"
+        spec = base_v4_spec()
+        spec["page_id"] = nfd_path
+        for key in ("source_page", "target_metadata"):
+            spec[key]["path"] = nfd_path
+        for key in ("member_pages", "visual_targets"):
+            spec["cluster"][key] = [nfd_path]
+        spec["cluster"]["canary_page"] = nfd_path
+        spec["references"][0].update(path=nfd_path, subject=nfd_path)
+
+        request = module.compile_redraw_request(spec)
+
+        self.assertEqual(nfd_path, request["source_page_path"])
+        self.assertIn(
+            json.dumps(nfd_path, ensure_ascii=False), request["compiled_prompt"]
+        )
+        self.assertNotEqual(nfc_path, request["source_page_path"])
+
+        mismatch = copy.deepcopy(spec)
+        mismatch["references"][0].update(path=nfc_path, subject=nfc_path)
+        with self.assertRaisesRegex(
+            ValueError, "exact target_composition path|target_composition"
+        ):
+            module.compile_redraw_request(mismatch)
 
     def test_v4_rejects_missing_profile_dimension_drift_and_target_binding_drift(self):
         module = prompt_compiler()
