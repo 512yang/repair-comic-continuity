@@ -8,6 +8,8 @@ Every page belongs to exactly one cluster. Each cluster binds one role-complete 
 
 Reference roles are exact: target composition, comic style, identity, prop, and scene. Character sheets are identity-only. A visual pack must cover the complete involved cast; unrelated identity sheets do not satisfy coverage.
 
+Track `reference_pack_state` explicitly. A new cluster starts `unbound`; `bind_reference_pack` verifies the content-addressed pack and moves it to `bound`. Any later `rebind` requires a new pack identity plus reviewed audit evidence; never replace references behind an existing binding.
+
 ## Schedule safely
 
 Use one coordinator and at most 3 workers. Tasks move through `queued`, `leased`, `completed`, or `failed`. One worker holds at most one live lease, and two workers cannot own the same page. Evidence and final output use atomic single-writer promotion.
