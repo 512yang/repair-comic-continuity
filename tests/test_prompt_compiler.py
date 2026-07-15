@@ -1704,7 +1704,16 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
             refresh_text_inventory(spec)
             return spec
 
-        for separator in ("\r\n", "\r", "\n", "\u2028", "\u2029"):
+        for separator in (
+            "\r\n",
+            "\r",
+            "\n",
+            "\u000b",
+            "\u000c",
+            "\u0085",
+            "\u2028",
+            "\u2029",
+        ):
             valid = text_spec(f"a{separator}b", [100, 120, 420, 184])
             block = module.compile_text_repair_request(valid)["declaration"]["blocks"][0]
             with self.subTest(separator=repr(separator)):
@@ -1715,10 +1724,27 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "line slots|cross-axis|hard line"):
                     module.compile_text_repair_request(one_line)
 
-        explicit = text_spec("a\nb", [100, 120, 420, 184])
-        explicit["blocks"][0]["layout_lines"] = ["a\nb"]
-        with self.assertRaisesRegex(ValueError, "layout_lines.*separator|newline"):
-            module.compile_text_repair_request(explicit)
+        for separator in (
+            "\r\n",
+            "\r",
+            "\n",
+            "\u000b",
+            "\u000c",
+            "\u0085",
+            "\u2028",
+            "\u2029",
+        ):
+            explicit = text_spec(f"a{separator}b", [100, 120, 420, 184])
+            explicit["blocks"][0]["layout_lines"] = [f"a{separator}b"]
+            with self.subTest(explicit=repr(separator)):
+                with self.assertRaisesRegex(ValueError, "layout_lines.*separator|newline"):
+                    module.compile_text_repair_request(explicit)
+
+        for control in ("\u0000", "\u0001", "\u001f", "\u007f", "\u009f"):
+            controlled = text_spec(f"a{control}b", [100, 120, 420, 184])
+            with self.subTest(control=repr(control)):
+                with self.assertRaisesRegex(ValueError, "control character"):
+                    module.compile_text_repair_request(controlled)
 
         tabbed = text_spec("a\tb", [100, 120, 420, 184])
         with self.assertRaisesRegex(ValueError, "tab"):

@@ -111,7 +111,8 @@ _TEXT_BLOCK_REQUIRED_KEYS = frozenset(
 _TEXT_BLOCK_KEYS = _TEXT_BLOCK_REQUIRED_KEYS | {"density_override_reason"}
 _TEXT_MODES = frozenset({"block_replace", "page_reset"})
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
-_HARD_LINE_BREAK_RE = re.compile(r"\r\n|[\r\n\u2028\u2029]")
+_HARD_LINE_BREAK_RE = re.compile(r"\r\n|[\r\n\x0b\x0c\x85\u2028\u2029]")
+_HARD_LINE_CONTROL_CODEPOINTS = frozenset({0x0A, 0x0B, 0x0C, 0x0D, 0x85})
 
 _V4_REDRAW_KEYS = frozenset(
     {
@@ -1604,6 +1605,15 @@ def _visible_character_count(value: str) -> int:
     return len(_visible_graphemes(value))
 
 
+def _reject_disallowed_controls(value: str, name: str) -> None:
+    for character in value:
+        codepoint = ord(character)
+        if codepoint in _HARD_LINE_CONTROL_CODEPOINTS:
+            continue
+        if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            raise ValueError(f"{name} contains a forbidden control character")
+
+
 def _layout_width(value: str) -> int:
     """Return deterministic font-cell width; spaces consume one cell."""
     if "\t" in value:
@@ -1631,6 +1641,7 @@ def _explicit_layout_lines(
             raise ValueError(f"{name}[{index}] must not contain a tab")
         if _HARD_LINE_BREAK_RE.search(item):
             raise ValueError(f"{name}[{index}] must not contain a line separator or newline")
+        _reject_disallowed_controls(item, f"{name}[{index}]")
         lines.append(item)
 
     hard_segments = _HARD_LINE_BREAK_RE.split(replacement)
@@ -2106,6 +2117,7 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         )
         if "\t" in replacement:
             raise ValueError("replacement_text must not contain a tab")
+        _reject_disallowed_controls(replacement, "replacement_text")
         if replacement != novel_text[start:end]:
             raise ValueError(
                 "replacement_text must exactly match its hash-bound novel offset slice"
