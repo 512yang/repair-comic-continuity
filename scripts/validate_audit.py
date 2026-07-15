@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from entity_timeline import validate_timeline
 from pipeline_contracts import canonical_hash
 from validate_appearance_matrix import validate_matrix
+from validate_human_visual_selection import validate_human_visual_selection
 from validate_source_text_audit import validate_source_text_audit
 from project_common import (
     INPUT_PAGE_EXTENSIONS,
@@ -54,6 +56,14 @@ def _candidate_images(root: Path) -> list[Path]:
     ]
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
     """Validate audit completeness and prove that generation has not begun."""
     project = discover_project(Path(root))
@@ -82,18 +92,37 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
     timeline = _load_json(evidence / "entity_state_timeline.json")
     audits = _load_json(evidence / "page_audit.json")
     queue = _load_json(evidence / "task_queue.json")
+    selection_path = evidence / "human_visual_selection.json"
+    if selection_path.is_file():
+        try:
+            selection = validate_human_visual_selection(
+                _load_json(selection_path), project.input_dir, input_names
+            )
+        except ValueError as exc:
+            raise ValueError(f"audit-only human visual selection is invalid: {exc}") from exc
+        audit_mode = "human_visual_auto_text"
+        selected_visual_pages = selection["selected_pages"]
+    else:
+        audit_mode = "automatic_full_visual_audit"
+        selected_visual_pages = input_names
+    selected_visual_set = set(selected_visual_pages)
+
     matrix_path = evidence / "character_appearance_matrix.json"
-    if not matrix_path.is_file():
-        raise ValueError("audit-only appearance matrix is missing")
-    try:
-        appearance_matrix = validate_matrix(_load_json(matrix_path))
-    except ValueError as exc:
-        raise ValueError(f"audit-only appearance matrix is invalid: {exc}") from exc
-    if (
-        appearance_matrix.get("status") not in {"confirmed", "defects_confirmed"}
-        or appearance_matrix.get("cluster_pages") != input_names
-    ):
-        raise ValueError("audit-only appearance matrix coverage is incomplete")
+    if selected_visual_pages:
+        if not matrix_path.is_file():
+            raise ValueError("audit-only appearance matrix is missing")
+        try:
+            appearance_matrix = validate_matrix(_load_json(matrix_path))
+        except ValueError as exc:
+            raise ValueError(f"audit-only appearance matrix is invalid: {exc}") from exc
+        if (
+            appearance_matrix.get("status") not in {"confirmed", "defects_confirmed"}
+            or appearance_matrix.get("cluster_pages") != selected_visual_pages
+        ):
+            raise ValueError("audit-only appearance matrix coverage is incomplete")
+        appearance_matrix_status = appearance_matrix["status"]
+    else:
+        appearance_matrix_status = "not_applicable"
     for label, document in (
         ("scene_clusters", clusters),
         ("style_reference_packs", packs),
@@ -134,6 +163,14 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
     if set(by_page) != set(input_names):
         raise ValueError("audit-only page audit coverage is incomplete")
     second_reviews = 0
+    selection_relative = (
+        selection_path.relative_to(project.root).as_posix()
+        if audit_mode == "human_visual_auto_text"
+        else None
+    )
+    selection_hash = (
+        _sha256(selection_path) if audit_mode == "human_visual_auto_text" else None
+    )
     for page in input_names:
         row = by_page[page]
         records = row.get("audits") if isinstance(row.get("audits"), list) else []
@@ -143,9 +180,40 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
             and record.get("perspective") == "continuity"
             and record.get("artifact", {}).get("kind") == "full_resolution_page"
         ]
-        if len(primary) != 1:
-            raise ValueError(f"audit-only page requires one full-resolution primary audit: {page}")
+        if page in selected_visual_set:
+            if len(primary) != 1:
+                raise ValueError(
+                    f"audit-only page requires one full-resolution primary audit: {page}"
+                )
+        else:
+            if primary:
+                raise ValueError(
+                    f"audit-only unselected page contains full-resolution visual audit: {page}"
+                )
+            scope_records = [
+                record for record in records
+                if isinstance(record, dict)
+                and record.get("perspective") == "human_visual_scope"
+                and record.get("artifact", {}).get("kind")
+                == "user_selected_page_list"
+            ]
+            if len(scope_records) != 1:
+                raise ValueError(
+                    f"audit-only unselected page requires one human visual scope audit: {page}"
+                )
+            scope_artifact = scope_records[0]["artifact"]
+            if (
+                scope_artifact.get("path") != selection_relative
+                or scope_artifact.get("sha256") != selection_hash
+            ):
+                raise ValueError(
+                    f"audit-only human visual scope artifact mismatch: {page}"
+                )
         decision = row.get("decision")
+        if page not in selected_visual_set and decision == "full_page_redraw":
+            raise ValueError(
+                f"audit-only unselected page cannot enter full_page_redraw: {page}"
+            )
         if decision == "second_review_required":
             if len(records) < 2:
                 raise ValueError(f"audit-only second review is incomplete: {page}")
@@ -181,7 +249,9 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
         "candidate_count": 0,
         "promoted_output_count": 0,
         "second_review_count": second_reviews,
-        "appearance_matrix_status": appearance_matrix["status"],
+        "audit_mode": audit_mode,
+        "selected_visual_page_count": len(selected_visual_pages),
+        "appearance_matrix_status": appearance_matrix_status,
         "source_text_audit_count": len(input_names),
     }
 

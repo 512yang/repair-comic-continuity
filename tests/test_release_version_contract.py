@@ -14,8 +14,16 @@ class ReleaseVersionContractTests(unittest.TestCase):
         self.assertIn('EVIDENCE_PIPELINE_ID = "continuity_v4"', version)
         self.assertIn('EVIDENCE_SCHEMA_VERSION = "4.0"', version)
         self.assertIn(
-            'RELEASE_CERTIFICATE_ID = "continuity-v5.2-signed-20260715"',
+            'RELEASE_CERTIFICATE_ID = "continuity-v5.3-signed-20260716"',
             version,
+        )
+
+        certificate_validator = (
+            ROOT / "scripts" / "validate_release_certificate.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"scripts/validate_human_visual_selection.py"',
+            certificate_validator,
         )
 
         builder = (ROOT / "scripts" / "build_output_manifest.py").read_text(encoding="utf-8")

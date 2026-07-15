@@ -161,6 +161,54 @@ class AuditOnlyValidationTests(unittest.TestCase):
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
+    def write_human_selection(self, selected_pages):
+        path = self.evidence / "human_visual_selection.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "status": "confirmed",
+                    "mode": "human_visual_auto_text",
+                    "selected_pages": [
+                        {
+                            "path": page,
+                            "sha256": self.artifact(
+                                self.root / "输入" / page
+                            )["sha256"],
+                        }
+                        for page in selected_pages
+                    ],
+                    "visual_policy": "selected_pages_only",
+                    "text_policy": "all_input_pages_page_reset_preserve_style",
+                    "output_policy": "exact_input_bijection",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def write_unselected_scope_audit(self, decision="text_only"):
+        selection = self.evidence / "human_visual_selection.json"
+        write_registry(
+            self.evidence / "page_audit.json",
+            {
+                "schema_version": "1.0",
+                "status": "audit_passed",
+                "pages": [{
+                    "page": "189.jpg",
+                    "decision": decision,
+                    "audits": [{
+                        "perspective": "human_visual_scope",
+                        "artifact": {
+                            "kind": "user_selected_page_list",
+                            **self.artifact(selection),
+                        },
+                    }],
+                }],
+            },
+        )
+
     def test_audit_only_accepts_complete_audits_without_candidates(self):
         before = self.tree_bytes()
         result = validate_audit_project(self.root, self.evidence)
@@ -198,6 +246,42 @@ class AuditOnlyValidationTests(unittest.TestCase):
 
         source_audit = self.evidence / "source_text_audit" / "189.jpg.json"
         source_audit.unlink()
+        with self.assertRaisesRegex(ValueError, "source text audit"):
+            validate_audit_project(self.root, self.evidence)
+
+    def test_human_mode_selected_page_keeps_full_resolution_visual_review(self):
+        self.write_human_selection(["189.jpg"])
+        result = validate_audit_project(self.root, self.evidence)
+        self.assertEqual(result["audit_mode"], "human_visual_auto_text")
+        self.assertEqual(result["selected_visual_page_count"], 1)
+        self.assertEqual(result["appearance_matrix_status"], "confirmed")
+        self.assertEqual(result["source_text_audit_count"], 1)
+
+    def test_human_mode_empty_selection_skips_visual_matrix_but_keeps_text_audit(self):
+        self.write_human_selection([])
+        (self.evidence / "character_appearance_matrix.json").unlink()
+        self.write_unselected_scope_audit()
+
+        result = validate_audit_project(self.root, self.evidence)
+        self.assertEqual(result["audit_mode"], "human_visual_auto_text")
+        self.assertEqual(result["selected_visual_page_count"], 0)
+        self.assertEqual(result["appearance_matrix_status"], "not_applicable")
+        self.assertEqual(result["source_text_audit_count"], 1)
+
+    def test_human_mode_unselected_page_cannot_enter_full_page_redraw(self):
+        self.write_human_selection([])
+        (self.evidence / "character_appearance_matrix.json").unlink()
+        self.write_unselected_scope_audit(decision="full_page_redraw")
+
+        with self.assertRaisesRegex(ValueError, "unselected page cannot enter full_page_redraw"):
+            validate_audit_project(self.root, self.evidence)
+
+    def test_human_mode_still_requires_source_text_audit_on_unselected_page(self):
+        self.write_human_selection([])
+        (self.evidence / "character_appearance_matrix.json").unlink()
+        self.write_unselected_scope_audit()
+        (self.evidence / "source_text_audit" / "189.jpg.json").unlink()
+
         with self.assertRaisesRegex(ValueError, "source text audit"):
             validate_audit_project(self.root, self.evidence)
 

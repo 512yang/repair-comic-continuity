@@ -23,7 +23,7 @@ Run production work only inside an isolated run root created by `scripts/prepare
 2. Preserve the same relative path, filename, and extension for every output. Input count and output count must both equal `N`; no page may be added, omitted, flattened, or renamed.
 3. Confirm per-page novel alignment with source offsets and evidence.
 4. Build semantic scene clusters, reference packs, and `entity_state_timeline.json`.
-5. Build and validate `character_appearance_matrix.json`, then run full-resolution dual audits. The matrix must bind every cluster page and every named character to an identity reference and compare skin tone, hair, facial hair, clothing, face shape, and body build across the complete cluster; contact sheets are orientation aids only and are never pass evidence.
+5. Build and validate `character_appearance_matrix.json`, then run full-resolution dual audits. In automatic mode the matrix must bind every cluster page; in `human_visual_auto_text` mode it must bind every user-selected visual page. In either mode, bind every named character in scope to an identity reference and compare skin tone, hair, facial hair, clothing, face shape, and body build; contact sheets are orientation aids only and are never pass evidence.
 6. Build a complete text-region inventory, a full-resolution source glyph board, and a hash-bound original `style_lock` for every ordinary-text block. Record a visual decision for each block and an explicit non-OCR-only shape decision for every occurrence of 强 and 遇. Validate each page with `scripts/validate_source_text_audit.py`; its independent machine/visual block inventories, bounding boxes, and transcriptions must match exactly, every source crop must pixel-match the current page, every adjacent Chinese repeat must have an explicit intentional/defect decision, and every block must bind an exact hash-bound novel excerpt plus offsets and a semantic decision. An empty inventory requires a third independent, full-resolution `textless_review`. If any ordinary-text block lacks source-crop or novel coverage, the page cannot be classified. Missing or low-confidence evidence is `evidence_blocked`.
 7. Assign exactly one page class: `unchanged`, `text_only`, `full_page_redraw`, or `evidence_blocked`.
 8. Release only approved tasks. Use a canary before expensive work in a cluster.
@@ -34,6 +34,18 @@ At startup, run `python scripts/validate_release_certificate.py --root <skill-ro
 Ask the user for project-specific adjudication only when the certificate invalid result persists after one clean recheck, auditor disagreement remains unresolved, a page is `evidence_blocked`, or a genuinely new failure family falls outside certified coverage. Without a valid certificate, do not generate or promote images. For a new Skill version without a signed certificate, compare a blind audit with a user-reviewed golden dataset using `scripts/validate_detection_benchmark.py`. Release requires zero missed confirmed defects, zero false-positive defects, exact page coverage, and correct-page protection. A contact sheet, OCR-only result, or self-authored answer key cannot satisfy this gate.
 
 Do not skip ahead. Audit uncertainty remains `evidence_blocked`; it is never silently treated as a correct page or a redraw instruction.
+
+## Human-selected visual mode
+
+When the user supplies the visual-problem page numbers or names, use `human_visual_auto_text` inside this Skill; do not create a second Skill. Resolve the list to exact input-relative names and sealed source hashes in `evidence/human_visual_selection.json`, then validate it with `scripts/validate_human_visual_selection.py`. The manual list controls visual redraw scope only.
+
+- Selected pages still require full-resolution reference, adjacency, scene-state, and novel evidence before redraw. Their appearance matrix must exactly cover the selected list.
+- Unselected pages use hash-bound `human_visual_scope` evidence instead of model-based visual detection; unselected pages cannot enter `full_page_redraw`.
+- In this mode, every input page still receives the complete source-text audit. Every ordinary text-bearing page still uses `page_reset_preserve_style`, preserving the original font, color, size, position, orientation, line geometry, and balloon geometry.
+- Empty visual selection is valid, but it never disables all-page text work. Unknown, duplicate, reordered, or source-hash-drifted selections are `evidence_blocked`.
+- Preserve the exact input/output bijection, including identical relative path, filename, extension, and page count.
+
+See [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) for the exact manifest and audit-record contracts.
 
 ## Continuity-first image policy
 
@@ -64,7 +76,7 @@ Cluster contiguous story beats by chapter, location, story time, cast state, cos
 
 Use one coordinator and at most 3 workers. Each worker holds one durable lease and writes only to its isolated candidate directory. Use a single writer for evidence and final promotion. A generator cannot approve its own candidate. The coordinator may run independent audit and review work in parallel, but never uses parallelism to bypass gates.
 
-Only pages with confirmed visual defects enter image generation. Correct pages still receive text and continuity checks but do not consume a generation call.
+Only pages with confirmed visual defects enter image generation. Correct pages still receive the text checks required by the active mode but do not consume a generation call.
 
 Run `python scripts/validate_appearance_matrix.py evidence/character_appearance_matrix.json` before classifying any page. A missing character page, missing identity reference, non-full-resolution observation, `not_visible` trait on a visible character, or unexplained trait drift blocks confirmation. A source matrix may use `defects_confirmed` only when two independent full-resolution reviewers agree, every drift trait has a hash-bound `confirmed_defect` review, and the affected page is eligible for `full_page_redraw` classification. This state authorizes a repair task, not release: release still requires a `confirmed` appearance matrix with every repaired trait matching. Do not excuse a same-scene skin-tone category change as lighting without explicit full-resolution evidence. Reject generated candidates that reintroduce a drift already recorded in the matrix.
 
@@ -92,7 +104,7 @@ Before promotion, require:
 
 - every input has exactly one output at the identical relative path and extension;
 - every page has a confirmed alignment, semantic cluster, reference binding, entity-state decision, class-specific preflight, completed task, and resolved dual audit;
-- every scene cluster has a confirmed `character_appearance_matrix.json` with exact page coverage and no unresolved skin, hair, facial-hair, clothing, face-shape, or body-build drift;
+- every automatic-mode scene cluster has a confirmed `character_appearance_matrix.json` with exact cluster coverage; every human-mode matrix has exact selected-page coverage; neither may retain unresolved skin, hair, facial-hair, clothing, face-shape, or body-build drift;
 - every page has a confirmed `source_text_audit` with exact machine/visual block coverage, pixel-bound source crops, exact novel offsets and semantic decisions, reviewed adjacent repeats, and non-OCR shape checks for every 强 and 遇 occurrence;
 - all full-resolution review artifacts exist and match their recorded hashes;
 - generator, page reviewer, and cluster reviewer satisfy independence and chronological ordering;

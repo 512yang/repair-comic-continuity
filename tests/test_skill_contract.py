@@ -179,6 +179,20 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, documents)
 
+    def test_human_visual_scope_never_weakens_full_page_text_repair(self):
+        documents = read("SKILL.md") + "\n" + read("references/scene-cluster-pipeline.md")
+        for phrase in (
+            "human_visual_auto_text",
+            "human_visual_selection.json",
+            "manual list controls visual redraw scope only",
+            "every input page still receives",
+            "page_reset_preserve_style",
+            "unselected pages cannot enter `full_page_redraw`",
+            "exact input/output bijection",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
 
 if __name__ == "__main__":
     unittest.main()

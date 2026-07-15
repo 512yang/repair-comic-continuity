@@ -35,6 +35,7 @@ REQUIRED_CONTROL_FILES = frozenset(
         "scripts/validate_appearance_matrix.py",
         "scripts/validate_audit.py",
         "scripts/validate_detection_benchmark.py",
+        "scripts/validate_human_visual_selection.py",
         "scripts/validate_release_certificate.py",
         "scripts/validate_source_text_audit.py",
         "assets/release_evidence/golden_text_detection_v2.json",

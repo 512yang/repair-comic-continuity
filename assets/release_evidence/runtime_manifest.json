@@ -1,71 +1,75 @@
 {
-    "schema_version":  "1.0",
-    "release_id":  "continuity-v5.2-signed-20260715",
-    "scope":  "generic_detection_control_plane",
-    "files":  [
-                  {
-                      "path":  "SKILL.md",
-                      "sha256":  "e704d10d358b53c125bd4d820c887432a2be3ad08432bad10122cdd33e81302a"
-                  },
-                  {
-                      "path":  "agents/openai.yaml",
-                      "sha256":  "2069bfe4e60de908bd6f3f49b03404f3c98a8dc9a71aa673cd5ca84750833903"
-                  },
-                  {
-                      "path":  "assets/release_evidence/detected_text_detection_v2.json",
-                      "sha256":  "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
-                  },
-                  {
-                      "path":  "assets/release_evidence/golden_text_detection_v2.json",
-                      "sha256":  "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
-                  },
-                  {
-                      "path":  "references/continuity-rules.md",
-                      "sha256":  "65daf4341710c47315748392f322d0acbc5d369c8a58737fe70d40e5f062bef7"
-                  },
-                  {
-                      "path":  "references/failure-learning.md",
-                      "sha256":  "022c888dceff35efad6d95ed6019d5ba61b99c007e03dca3149b522aef7c1328"
-                  },
-                  {
-                      "path":  "references/qa-checklist.md",
-                      "sha256":  "34a98e8200285c67ae099dcfa47722502c0834cac3ab46f32e6d2826affedc0c"
-                  },
-                  {
-                      "path":  "references/scene-cluster-pipeline.md",
-                      "sha256":  "804215dc5842025fc33888026b8e49113dfd7b0ba2dad1f6832212a75f120be8"
-                  },
-                  {
-                      "path":  "references/text-engine.md",
-                      "sha256":  "575221ed84663c85effe0e3dea067d994a696b9a01f31abe65054640d3d9439c"
-                  },
-                  {
-                      "path":  "scripts/pipeline_version.py",
-                      "sha256":  "b769c6b965b3fadd3731ae55972cf21608e5dfecb700f006bec9c39fe8391b6f"
-                  },
-                  {
-                      "path":  "scripts/release_gate.py",
-                      "sha256":  "e799ae6485ce6c2fe9c1484d5a696aad8618443d64693c59eae82219b53f854f"
-                  },
-                  {
-                      "path":  "scripts/validate_appearance_matrix.py",
-                      "sha256":  "6e84f7948c2b7972b0f3e2cb3c8b5131cb985501d3cf57151a8bce78e5ac97a6"
-                  },
-                  {
-                      "path":  "scripts/validate_audit.py",
-                      "sha256":  "63d7e42d0eada2954da3a7731b0e076944be433a355c84105ded46db8a39bef3"
-                  },
-                  {
-                      "path":  "scripts/validate_detection_benchmark.py",
-                      "sha256":  "37335ff9bd6494996e5740c42b7fa31641681ad75ec8129b25c3788bb2db2ce0"
-                  },
-                  {
-                      "path":  "scripts/validate_release_certificate.py",
-                      "sha256":  "96f2b7f417428a6b6fa717a63905c67491af72d8fa1a48b741993b9ba9eda463"
-                  },
-                  {
-                      "path":  "scripts/validate_source_text_audit.py",
-                      "sha256":  "5a0c267984b197ad62f27f5856c24438ce91261a9fffe1b5ceb0bfec62e0b6df"
-                  }
-              ]
+  "schema_version": "1.0",
+  "release_id": "continuity-v5.3-signed-20260716",
+  "scope": "generic_detection_control_plane",
+  "files": [
+    {
+      "path": "agents/openai.yaml",
+      "sha256": "2069bfe4e60de908bd6f3f49b03404f3c98a8dc9a71aa673cd5ca84750833903"
+    },
+    {
+      "path": "assets/release_evidence/detected_text_detection_v2.json",
+      "sha256": "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
+    },
+    {
+      "path": "assets/release_evidence/golden_text_detection_v2.json",
+      "sha256": "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
+    },
+    {
+      "path": "references/continuity-rules.md",
+      "sha256": "65daf4341710c47315748392f322d0acbc5d369c8a58737fe70d40e5f062bef7"
+    },
+    {
+      "path": "references/failure-learning.md",
+      "sha256": "022c888dceff35efad6d95ed6019d5ba61b99c007e03dca3149b522aef7c1328"
+    },
+    {
+      "path": "references/qa-checklist.md",
+      "sha256": "34a98e8200285c67ae099dcfa47722502c0834cac3ab46f32e6d2826affedc0c"
+    },
+    {
+      "path": "references/scene-cluster-pipeline.md",
+      "sha256": "57e33a39e13512bdf46c368013bcc9a7663971f223d9d6d5fa30cf0508713114"
+    },
+    {
+      "path": "references/text-engine.md",
+      "sha256": "575221ed84663c85effe0e3dea067d994a696b9a01f31abe65054640d3d9439c"
+    },
+    {
+      "path": "scripts/pipeline_version.py",
+      "sha256": "7552ba09af41bdbe4e45b42578714ab277a99f5ef9a9881ead55fee3721c4b96"
+    },
+    {
+      "path": "scripts/release_gate.py",
+      "sha256": "e799ae6485ce6c2fe9c1484d5a696aad8618443d64693c59eae82219b53f854f"
+    },
+    {
+      "path": "scripts/validate_appearance_matrix.py",
+      "sha256": "6e84f7948c2b7972b0f3e2cb3c8b5131cb985501d3cf57151a8bce78e5ac97a6"
+    },
+    {
+      "path": "scripts/validate_audit.py",
+      "sha256": "101ff94444d224de89c2e53ba82befd1192c9fe7847b48ebe2b6091679d9b9a5"
+    },
+    {
+      "path": "scripts/validate_detection_benchmark.py",
+      "sha256": "37335ff9bd6494996e5740c42b7fa31641681ad75ec8129b25c3788bb2db2ce0"
+    },
+    {
+      "path": "scripts/validate_human_visual_selection.py",
+      "sha256": "e93a71520f799a2cf26f8bc105df7546b56ea170a59bdf521cc1165137e32c04"
+    },
+    {
+      "path": "scripts/validate_release_certificate.py",
+      "sha256": "742bfb2d1674e8b32b8c71107d082ba51bfaece9d7ebe578d71b348d143c763c"
+    },
+    {
+      "path": "scripts/validate_source_text_audit.py",
+      "sha256": "5a0c267984b197ad62f27f5856c24438ce91261a9fffe1b5ceb0bfec62e0b6df"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "b944c87cef6d25828b1956efba6c8c3d9a8a3433e38183ad10fc2b9d3e321f4a"
+    }
+  ]
 }

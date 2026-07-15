@@ -1,29 +1,29 @@
 {
-    "benchmark":  {
-                      "correct_page_false_positive_count":  0,
-                      "false_positive_defects":  0,
-                      "missed_confirmed_defects":  0,
-                      "page_count":  13,
-                      "text_recall":  1
-                  },
-    "detected":  {
-                     "path":  "assets/release_evidence/detected_text_detection_v2.json",
-                     "sha256":  "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
-                 },
-    "golden":  {
-                   "path":  "assets/release_evidence/golden_text_detection_v2.json",
-                   "sha256":  "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
-               },
-    "issued_at":  "2026-07-15T23:50:00+08:00",
-    "key_id":  "rcc-v5-197b0529fbf361d4a388d025",
-    "pipeline_id":  "continuity_v5_unified",
-    "release_id":  "continuity-v5.2-signed-20260715",
-    "runtime_manifest":  {
-                             "path":  "assets/release_evidence/runtime_manifest.json",
-                             "sha256":  "6a93bb7dd6820bfa9b782aba3b78520bc97cc511c57f9b93ccf49d1245a22f3b"
-                         },
-    "schema_version":  "1.0",
-    "scope":  "generic_detection_benchmark",
-    "signature_algorithm":  "rsa-pkcs1v15-sha256",
-    "signature":  "UhU4iQFPVxXzqjW4tx1bATCfYPMD6uzqLoT+PLs7w9C5oUVEGPLZTXcMTJgqYNUNdy+qUraG1yiQ9mSXEslJLUefsCHYH+iQY+yEf1u/xELNqqLMJu00RaGv656Z/206nztLmLyFGM3IS9Ymo7jAcS0cs4JcJ7lpBZT4Bmn+AL0Bx/QIBKo6mx2P5PjGqrY+5KSw0WRWqhwhmx/eopF1GxpKqyWaK+KdzEk/uYuxWXytEZvHIIDgv2Yoqa11wWMSSWtfXzUOQNDzWJYSCqAa8IrPb1LiacPE0URoFvk7TPrwkTLc574IbceeB5uYkR40urIlceKx7NJ/vHwASFuukOvdsP4p+E8z0GB7vV8c5lziGhlo8meOqRkEZF9g7sRpQFP+ESFgron/pR30Y8teebeSYyE2R+9aEf3F4W00ASXQuqI6fEmggg/1YX/S87id6i425OwAwVrFBQ/A53hY2Dyl/pdw059gjrSZ8aQCAFe7XUgYnqLxPRjnnvIw81zs"
+  "schema_version": "1.0",
+  "release_id": "continuity-v5.3-signed-20260716",
+  "pipeline_id": "continuity_v5_unified",
+  "scope": "generic_detection_benchmark",
+  "issued_at": "2026-07-16T02:38:38.915+08:00",
+  "key_id": "rcc-v5-7682019c6d775a65630eb687",
+  "signature_algorithm": "rsa-pkcs1v15-sha256",
+  "runtime_manifest": {
+    "path": "assets/release_evidence/runtime_manifest.json",
+    "sha256": "6ec56835c449555b7af74a24bf1a3601478144cd95beae9c1c330096c340d88d"
+  },
+  "golden": {
+    "path": "assets/release_evidence/golden_text_detection_v2.json",
+    "sha256": "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
+  },
+  "detected": {
+    "path": "assets/release_evidence/detected_text_detection_v2.json",
+    "sha256": "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
+  },
+  "benchmark": {
+    "page_count": 13,
+    "missed_confirmed_defects": 0,
+    "false_positive_defects": 0,
+    "correct_page_false_positive_count": 0,
+    "text_recall": 1
+  },
+  "signature": "k4vUroDS7ePm8GrsjrhSNK39xvHujPUt7MBNHx1zGh1Rrc9HeLNnjKA8KLutHlqqCmpmIl0AWwckGce/h4v3RgaDrxAdYY9j+DT+xnYg4Q0Fj6MnLC3D0jPrSSDiOX+ge1jAheb4NLPvx4/jCV9EMBqwwzAeFp9p9xwGmoc9obb1dtpmghe2J0fRXqLM9Ny0NUv0OZWZHerVe1LAWn8rVmD1YezponzqloZlquuGOq0FKmSSIERsLW/MEPiFpyGRvhURDSsgWorPy45zoQsTbX6UD2m3MgiBhs26aC07dAvFwAPvVLqyAJAfOXpo7UC/pWyMkfFHWu7YSTfSV/ewhhMvrr/6XYRE3hOwzP51y4D6yQQiHhGLOS8m11EAlxCkOzZDf6oe2iToFqPnnMl2B1Sn76XdmupE3YPcYi4sZaGjRPROJeWZfNp1jarwGwD4zC3CefsoijyH728b8KhPldHMg37rYFEvAvNhWp28CrfiDcCzMywnUUHcQO7VjBVF"
 }
