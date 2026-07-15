@@ -9,6 +9,7 @@ import posixpath
 import re
 import unicodedata
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from failure_learning import FAILURE_CODES, RULE_SCOPES
@@ -207,10 +208,28 @@ _V4_FONT_PROFILES = {
     "sfx": frozenset({"sfx_display"}),
 }
 _V4_PAGE_VISUAL_KEYS = frozenset(
-    {"page_path", "source_page_sha256", "page_cast"}
+    {
+        "page_path",
+        "source_page_sha256",
+        "page_cast",
+        "status",
+        "full_resolution",
+        "reviewer_id",
+        "reviewer_display",
+        "reviewed_at",
+        "audit_evidence_path",
+        "audit_evidence_sha256",
+        "page_cast_empty_confirmed",
+    }
 )
 _V4_TEXT_INVENTORY_KEYS = frozenset(
-    {"source_page_sha256", "ordinary_text", "regions", "inventory_sha256"}
+    {
+        "source_page_sha256",
+        "ordinary_text",
+        "regions",
+        "coverage_review",
+        "inventory_sha256",
+    }
 )
 _V4_TEXT_REGION_KEYS = frozenset(
     {
@@ -221,6 +240,24 @@ _V4_TEXT_REGION_KEYS = frozenset(
         "source_balloon_exists",
         "source_text_sha256",
         "review",
+        "panel_id",
+        "orientation",
+        "reading_order",
+        "font_profile",
+        "speaker",
+    }
+)
+_V4_COVERAGE_REVIEW_KEYS = frozenset(
+    {
+        "source_page_sha256",
+        "status",
+        "full_resolution",
+        "reviewer_id",
+        "reviewed_at",
+        "scan_evidence_path",
+        "scan_evidence_sha256",
+        "inspected_bbox",
+        "coverage_complete",
     }
 )
 _V4_REGION_REVIEW_KEYS = frozenset(
@@ -784,6 +821,17 @@ def _sha256(value: object, name: str) -> str:
     return digest.lower()
 
 
+def _zoned_iso(value: object, name: str) -> str:
+    timestamp = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include timezone")
+    return timestamp
+
+
 def _positive_integer(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -874,11 +922,44 @@ def _normalize_page_visual_metadata(
         raise ValueError("page_visual_metadata must bind the exact immutable source_page")
     if metadata_cast != page_cast:
         raise ValueError("page_visual_metadata.page_cast must exactly match page_cast")
-    return {
+    status = _text(metadata["status"], "page_visual_metadata.status")
+    if status != "passed":
+        raise ValueError("page_visual_metadata status must be passed")
+    if metadata["full_resolution"] is not True:
+        raise ValueError("page_visual_metadata requires full-resolution audit")
+    empty_confirmed = metadata["page_cast_empty_confirmed"]
+    if not isinstance(empty_confirmed, bool):
+        raise ValueError("page_cast_empty_confirmed must be a boolean")
+    if not page_cast and not empty_confirmed:
+        raise ValueError("empty page_cast must be explicitly confirmed by page audit")
+    if page_cast and empty_confirmed:
+        raise ValueError("page_cast_empty_confirmed must be false for nonempty page_cast")
+    body = {
         "page_path": path,
         "source_page_sha256": digest,
         "page_cast": metadata_cast,
+        "status": status,
+        "full_resolution": True,
+        "reviewer_id": _text(
+            metadata["reviewer_id"], "page_visual_metadata.reviewer_id"
+        ),
+        "reviewer_display": _text(
+            metadata["reviewer_display"], "page_visual_metadata.reviewer_display"
+        ),
+        "reviewed_at": _zoned_iso(
+            metadata["reviewed_at"], "page_visual_metadata.reviewed_at"
+        ),
+        "audit_evidence_path": _data_path(
+            metadata["audit_evidence_path"],
+            "page_visual_metadata.audit_evidence_path",
+        ),
+        "audit_evidence_sha256": _sha256(
+            metadata["audit_evidence_sha256"],
+            "page_visual_metadata.audit_evidence_sha256",
+        ),
+        "page_cast_empty_confirmed": empty_confirmed,
     }
+    return {**body, "audit_binding_hash": canonical_hash(body)}
 
 
 def _normalize_v4_redraw_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -1037,6 +1118,15 @@ def _normalize_v4_redraw_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         cluster_id=cluster_id,
         characters=characters,
     )
+    off_page_rules = [
+        rule["rule_id"]
+        for rule in rules
+        if rule["character"] is not None and rule["character"] not in page_cast
+    ]
+    if off_page_rules:
+        raise ValueError(
+            f"character-specific rules must target page_cast; off-page rules: {off_page_rules!r}"
+        )
     return {
         "contract_version": "v4",
         "repair_profile": repair_profile,
@@ -1227,10 +1317,20 @@ def _graphemes(value: str) -> list[str]:
             or 0xFE00 <= codepoint <= 0xFE0F
             or 0xE0100 <= codepoint <= 0xE01EF
             or 0x1F3FB <= codepoint <= 0x1F3FF
+            or codepoint == 0x20E3
+        )
+        regional = 0x1F1E6 <= codepoint <= 0x1F1FF
+        previous_single_regional = bool(result) and len(result[-1]) == 1 and (
+            0x1F1E6 <= ord(result[-1]) <= 0x1F1FF
         )
         if not result:
             result.append(character)
-        elif character == "\u200d" or combines or join_next:
+        elif (
+            character == "\u200d"
+            or combines
+            or join_next
+            or (regional and previous_single_regional)
+        ):
             result[-1] += character
         else:
             result.append(character)
@@ -1304,7 +1404,9 @@ def _normalize_text_inventory(
     inventory = _mapping(value, "source_text_inventory")
     _unknown_keys(inventory, _V4_TEXT_INVENTORY_KEYS, "source_text_inventory")
     if set(inventory) != _V4_TEXT_INVENTORY_KEYS:
-        raise ValueError("source_text_inventory is missing required fields")
+        raise ValueError(
+            "source_text_inventory is missing required fields including coverage_review"
+        )
     source_digest = _sha256(
         inventory["source_page_sha256"],
         "source_text_inventory.source_page_sha256",
@@ -1314,11 +1416,56 @@ def _normalize_text_inventory(
     ordinary_text = inventory["ordinary_text"]
     if not isinstance(ordinary_text, bool):
         raise ValueError("source_text_inventory.ordinary_text must be a boolean")
+    coverage = _mapping(
+        inventory["coverage_review"], "source_text_inventory.coverage_review"
+    )
+    _unknown_keys(
+        coverage, _V4_COVERAGE_REVIEW_KEYS, "source_text_inventory.coverage_review"
+    )
+    if set(coverage) != _V4_COVERAGE_REVIEW_KEYS:
+        raise ValueError("source_text_inventory coverage_review is missing required fields")
+    coverage_source_hash = _sha256(
+        coverage["source_page_sha256"], "coverage_review.source_page_sha256"
+    )
+    if coverage_source_hash != source_page["sha256"]:
+        raise ValueError("coverage_review source_page_sha256 must match source_page")
+    if _text(coverage["status"], "coverage_review.status") != "passed":
+        raise ValueError("coverage_review status must be passed")
+    if coverage["full_resolution"] is not True:
+        raise ValueError("coverage_review requires full-resolution scan")
+    if coverage["coverage_complete"] is not True:
+        raise ValueError("coverage_review coverage_complete must be true")
+    inspected_bbox = _bbox(
+        coverage["inspected_bbox"], "coverage_review.inspected_bbox", canvas=canvas
+    )
+    if inspected_bbox != [0, 0, canvas["width"], canvas["height"]]:
+        raise ValueError("coverage_review must inspect the full canvas")
+    normalized_coverage = {
+        "source_page_sha256": coverage_source_hash,
+        "status": "passed",
+        "full_resolution": True,
+        "reviewer_id": _text(
+            coverage["reviewer_id"], "coverage_review.reviewer_id"
+        ),
+        "reviewed_at": _zoned_iso(
+            coverage["reviewed_at"], "coverage_review.reviewed_at"
+        ),
+        "scan_evidence_path": _data_path(
+            coverage["scan_evidence_path"], "coverage_review.scan_evidence_path"
+        ),
+        "scan_evidence_sha256": _sha256(
+            coverage["scan_evidence_sha256"],
+            "coverage_review.scan_evidence_sha256",
+        ),
+        "inspected_bbox": inspected_bbox,
+        "coverage_complete": True,
+    }
     raw_regions = inventory["regions"]
     if not isinstance(raw_regions, list):
         raise ValueError("source_text_inventory.regions must be a list")
     regions: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_orders: set[int] = set()
     for index, raw in enumerate(raw_regions):
         region = _mapping(raw, f"source_text_inventory.regions[{index}]")
         _unknown_keys(
@@ -1343,6 +1490,26 @@ def _normalize_text_inventory(
             raise ValueError("inventory source_balloon_exists must be a boolean")
         if kind == "dialogue" and not source_balloon_exists:
             raise ValueError("inventory cannot authorize a new dialogue balloon")
+        orientation = _text(region["orientation"], "inventory region orientation")
+        if orientation not in _V4_ORIENTATIONS:
+            raise ValueError("inventory region orientation is unsupported")
+        font_profile = _text(region["font_profile"], "inventory region font_profile")
+        approved_font_profiles = {
+            profile
+            for profiles in _V4_FONT_PROFILES.values()
+            for profile in profiles
+        }
+        if font_profile not in approved_font_profiles:
+            raise ValueError("inventory region font_profile is unsupported")
+        reading_order = region["reading_order"]
+        if (
+            not isinstance(reading_order, int)
+            or isinstance(reading_order, bool)
+            or reading_order <= 0
+            or reading_order in seen_orders
+        ):
+            raise ValueError("inventory region reading_order must be a unique positive integer")
+        seen_orders.add(reading_order)
         review = _mapping(region["review"], "inventory region review")
         _unknown_keys(review, _V4_REGION_REVIEW_KEYS, "inventory region review")
         if set(review) != _V4_REGION_REVIEW_KEYS:
@@ -1354,7 +1521,7 @@ def _normalize_text_inventory(
             "status": status,
             "full_size": True,
             "reviewer": _text(review["reviewer"], "inventory region review.reviewer"),
-            "reviewed_at": _text(
+            "reviewed_at": _zoned_iso(
                 review["reviewed_at"], "inventory region review.reviewed_at"
             ),
             "evidence_path": _data_path(
@@ -1376,6 +1543,11 @@ def _normalize_text_inventory(
                     "inventory source_text_sha256",
                 ),
                 "review": normalized_review,
+                "panel_id": _text(region["panel_id"], "inventory region panel_id"),
+                "orientation": orientation,
+                "reading_order": reading_order,
+                "font_profile": font_profile,
+                "speaker": _text(region["speaker"], "inventory region speaker"),
             }
         )
     if ordinary_text != bool(regions):
@@ -1386,6 +1558,7 @@ def _normalize_text_inventory(
         "source_page_sha256": source_digest,
         "ordinary_text": ordinary_text,
         "regions": regions,
+        "coverage_review": normalized_coverage,
     }
     digest = _sha256(inventory["inventory_sha256"], "inventory_sha256")
     if digest != canonical_hash(body):
@@ -1577,11 +1750,17 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("dialogue speaker must identify a character")
         if block_type == "dialogue" and speaker not in page_cast:
             raise ValueError("dialogue speaker must belong to page_cast")
+        panel_id = _text(block["panel_id"], f"blocks[{index}].panel_id")
         if (
             inventory_region["kind"] != block_type
             or inventory_region["shape"] != shape
             or inventory_region["bbox"] != block_bbox
             or inventory_region["source_balloon_exists"] != source_balloon_exists
+            or inventory_region["panel_id"] != panel_id
+            or inventory_region["orientation"] != orientation
+            or inventory_region["reading_order"] != reading_order
+            or inventory_region["font_profile"] != font_profile
+            or inventory_region["speaker"] != speaker
         ):
             raise ValueError(
                 "block inventory geometry and bbox must exactly match its source region"
@@ -1657,13 +1836,23 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
                     visible += increment
             if current:
                 layout_lines.append(current)
+        cross_axis_pixels = (
+            block_bbox[3] - block_bbox[1]
+            if orientation == "horizontal"
+            else block_bbox[2] - block_bbox[0]
+        )
+        max_line_slots = max(1, cross_axis_pixels // font_cell)
+        if len(layout_lines) > max_line_slots:
+            raise ValueError(
+                "layout exceeds cross-axis line slots for bbox, orientation, and font metrics"
+            )
         if chars_per_area > density["max_block_chars_per_10000_px2"]:
             raise ValueError("text density exceeds max_block_chars_per_10000_px2")
         normalized_block = {
             "block_id": block_id,
             "source_region_id": source_region_id,
             "type": block_type,
-            "panel_id": _text(block["panel_id"], f"blocks[{index}].panel_id"),
+            "panel_id": panel_id,
             "shape": shape,
             "bbox": block_bbox,
             "orientation": orientation,
@@ -1686,6 +1875,7 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
                 "chars_per_10000_px2": round(chars_per_area, 6),
                 "estimated_lines": len(layout_lines),
                 "line_capacity": line_capacity,
+                "max_line_slots": max_line_slots,
             },
         }
         blocks.append(normalized_block)

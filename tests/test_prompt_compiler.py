@@ -137,6 +137,14 @@ def base_v4_spec():
             "page_path": page_path,
             "source_page_sha256": "a" * 64,
             "page_cast": ["邓正虎"],
+            "status": "passed",
+            "full_resolution": True,
+            "reviewer_id": "page-auditor-1",
+            "reviewer_display": "页面审核员一",
+            "reviewed_at": "2026-07-15T10:00:00+08:00",
+            "audit_evidence_path": "evidence/page-audits/0252.json",
+            "audit_evidence_sha256": "8" * 64,
+            "page_cast_empty_confirmed": False,
         },
         "scene_summary": "人物仍在同一场景中，保持前后页连续性。",
         "novel_facts": ["小说动作细节只作剧情事实，不要求逐镜复刻。"],
@@ -203,11 +211,27 @@ def base_v4_text_spec():
         "source_balloon_exists": True,
         "source_text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
         "review": reviewed("text-region-dialogue-1"),
+        "panel_id": "panel-1",
+        "orientation": "horizontal",
+        "reading_order": 1,
+        "font_profile": "dialogue_regular",
+        "speaker": "邓正虎",
     }
     inventory_body = {
         "source_page_sha256": "a" * 64,
         "ordinary_text": True,
         "regions": [region],
+        "coverage_review": {
+            "source_page_sha256": "a" * 64,
+            "status": "passed",
+            "full_resolution": True,
+            "reviewer_id": "text-auditor-1",
+            "reviewed_at": "2026-07-15T10:05:00+08:00",
+            "scan_evidence_path": "evidence/text-scan/0252.json",
+            "scan_evidence_sha256": "7" * 64,
+            "inspected_bbox": [0, 0, 1120, 1493],
+            "coverage_complete": True,
+        },
     }
     inventory = {
         **inventory_body,
@@ -235,6 +259,14 @@ def base_v4_text_spec():
             "page_path": page_path,
             "source_page_sha256": "a" * 64,
             "page_cast": ["邓正虎"],
+            "status": "passed",
+            "full_resolution": True,
+            "reviewer_id": "page-auditor-1",
+            "reviewer_display": "页面审核员一",
+            "reviewed_at": "2026-07-15T10:00:00+08:00",
+            "audit_evidence_path": "evidence/page-audits/0252.json",
+            "audit_evidence_sha256": "8" * 64,
+            "page_cast_empty_confirmed": False,
         },
         "blocks": [
             {
@@ -279,6 +311,7 @@ def refresh_text_inventory(spec):
         "source_page_sha256": inventory["source_page_sha256"],
         "ordinary_text": inventory["ordinary_text"],
         "regions": inventory["regions"],
+        "coverage_review": inventory["coverage_review"],
     }
     inventory["inventory_sha256"] = canonical_hash(body)
 
@@ -1069,6 +1102,36 @@ class V4FullPageRedrawCompilerTests(unittest.TestCase):
             request["compiled_prompt"],
         )
 
+    def test_off_page_character_rule_is_rejected(self):
+        module = prompt_compiler()
+        spec = base_v4_spec()
+        second = "天狼真人"
+        spec["characters"].append(second)
+        spec["cluster"]["cast"].append(second)
+        spec["cluster"]["repair_characters"].append(second)
+        spec["references"].append(
+            {
+                "path": "人物参考图/天狼真人.png",
+                "role": "identity_only",
+                "subject": second,
+                "source": "character_sheet",
+                "review": reviewed("identity-tianlang-rule"),
+                "sha256": "6" * 64,
+            }
+        )
+        spec["effective_rules"] = [{
+            "rule_id": "off-page-character-rule",
+            "scope": "page",
+            "codes": ["identity_drift"],
+            "corrective_action": "不要改变画外角色。",
+            "page_id": "0252(1)",
+            "cluster_id": "cluster-rain",
+            "character": second,
+        }]
+
+        with self.assertRaisesRegex(ValueError, "page_cast|off-page"):
+            module.compile_redraw_request(spec)
+
     def test_v4_does_not_turn_equivalent_novel_action_into_redraw_instruction(self):
         module = prompt_compiler()
         spec = base_v4_spec()
@@ -1125,6 +1188,53 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
         self.assertIn("deterministic typesetting stage", first["prompt"])
         self.assertNotIn("render Chinese ordinary text", first["prompt"])
         self.assertNotIn(source["blocks"][0]["replacement_text"], first["prompt"])
+
+    def test_page_cast_requires_full_resolution_hash_bound_page_audit(self):
+        module = prompt_compiler()
+        for field, value, message in (
+            ("source_page_sha256", "f" * 64, "source_page"),
+            ("audit_evidence_sha256", "bad", "SHA-256"),
+            ("reviewed_at", "2026-07-15T10:00:00", "timezone"),
+            ("status", "pending", "passed"),
+            ("full_resolution", False, "full-resolution"),
+        ):
+            spec = base_v4_text_spec()
+            spec["page_visual_metadata"][field] = value
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.compile_text_repair_request(spec)
+
+        empty = base_v4_text_spec()
+        empty["page_cast"] = []
+        empty["page_visual_metadata"]["page_cast"] = []
+        empty["source_has_ordinary_text"] = False
+        empty["blocks"] = []
+        empty["source_text_inventory"].update(ordinary_text=False, regions=[])
+        refresh_text_inventory(empty)
+        with self.assertRaisesRegex(ValueError, "empty.*confirmed"):
+            module.compile_text_repair_request(empty)
+        empty["page_visual_metadata"]["page_cast_empty_confirmed"] = True
+        module.compile_text_repair_request(empty)
+
+    def test_inventory_requires_full_page_coverage_review(self):
+        module = prompt_compiler()
+        missing = base_v4_text_spec()
+        missing["source_text_inventory"].pop("coverage_review")
+        with self.assertRaisesRegex(ValueError, "coverage_review"):
+            module.compile_text_repair_request(missing)
+
+        for field, value, message in (
+            ("source_page_sha256", "f" * 64, "source_page"),
+            ("reviewed_at", "2026-07-15T10:05:00", "timezone"),
+            ("coverage_complete", False, "coverage"),
+            ("full_resolution", False, "full-resolution"),
+        ):
+            spec = base_v4_text_spec()
+            spec["source_text_inventory"]["coverage_review"][field] = value
+            refresh_text_inventory(spec)
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.compile_text_repair_request(spec)
 
     def test_text_request_binds_exact_source_path_canvas_and_duplicate_stems(self):
         module = prompt_compiler()
@@ -1186,6 +1296,20 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
         bad_inventory_hash["source_text_inventory"]["inventory_sha256"] = "f" * 64
         with self.assertRaisesRegex(ValueError, "inventory_sha256"):
             module.compile_text_repair_request(bad_inventory_hash)
+
+        for field, value in (
+            ("panel_id", "panel-2"),
+            ("orientation", "vertical"),
+            ("reading_order", 2),
+            ("font_profile", "caption_regular"),
+            ("speaker", "天狼真人"),
+        ):
+            forged = base_v4_text_spec()
+            forged["source_text_inventory"]["regions"][0][field] = value
+            refresh_text_inventory(forged)
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "inventory.*match|speaker"):
+                    module.compile_text_repair_request(forged)
 
     def test_declaration_hash_covers_every_executable_contract(self):
         module = prompt_compiler()
@@ -1314,6 +1438,8 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
                 kind=block_type,
                 shape=shape,
                 source_balloon_exists=False,
+                speaker=speaker,
+                font_profile=font,
             )
             refresh_text_inventory(spec)
             request = module.compile_text_repair_request(spec)
@@ -1334,7 +1460,9 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
         spec["blocks"].append(second)
         second_region = copy.deepcopy(spec["source_text_inventory"]["regions"][0])
         second_region.update(
-            region_id="region-dialogue-2", bbox=[300, 200, 600, 400]
+            region_id="region-dialogue-2",
+            bbox=[300, 200, 600, 400],
+            reading_order=2,
         )
         spec["source_text_inventory"]["regions"].append(second_region)
         refresh_text_inventory(spec)
@@ -1424,9 +1552,16 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive integer|density"):
             module.compile_text_repair_request(fractional)
 
+        cross_axis = copy.deepcopy(spec)
+        cross_axis["blocks"][0]["bbox"] = [100, 120, 420, 152]
+        cross_axis["source_text_inventory"]["regions"][0]["bbox"] = [100, 120, 420, 152]
+        refresh_text_inventory(cross_axis)
+        with self.assertRaisesRegex(ValueError, "line slots|cross-axis|layout"):
+            module.compile_text_repair_request(cross_axis)
+
     def test_visible_density_counts_grapheme_clusters_not_codepoints(self):
         module = prompt_compiler()
-        novel_text = "e\u0301👨\u200d👩\u200d👧\u200d👦"
+        novel_text = "e\u0301👨\u200d👩\u200d👧\u200d👦🇨🇳1️⃣"
         spec = base_v4_text_spec()
         novel_hash = hashlib.sha256(novel_text.encode("utf-8")).hexdigest()
         spec.update(source_novel_text=novel_text, source_novel_hash=novel_hash)
@@ -1449,7 +1584,7 @@ class V4TextGeometryCompilerTests(unittest.TestCase):
         request = module.compile_text_repair_request(spec)
 
         self.assertEqual(
-            2,
+            4,
             request["declaration"]["blocks"][0]["density"]["visible_characters"],
         )
 
