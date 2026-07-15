@@ -466,9 +466,9 @@ class TaskQueueTests(unittest.TestCase):
             },
         )
 
-    def test_three_lane_failures_pause_only_that_lane_and_reopen_requires_review(self):
+    def test_second_same_family_failure_pauses_only_that_lane_and_reopen_requires_review(self):
         queue = new_queue()
-        for index in range(3):
+        for index in range(2):
             task = add(queue, str(index + 1), f"a{index}", cluster_id="c1", prompt=f"p{index}")
             claim_task(queue, "worker", NOW + timedelta(seconds=index))
             fail_task(queue, task["task_id"], "worker", "artifact", f"fr-{index}", NOW + timedelta(seconds=index))
@@ -490,6 +490,31 @@ class TaskQueueTests(unittest.TestCase):
                     "reopened_at": reopened_at.isoformat(),
                 }
             ],
+        )
+
+    def test_same_family_attempts_pause_even_when_another_family_intervenes(self):
+        queue = new_queue()
+        for index, family in enumerate(("STYLE_DRIFT", "ANATOMY_ERROR", "STYLE_DRIFT")):
+            task = add(
+                queue,
+                str(index + 1),
+                f"payload-{index}",
+                cluster_id="c1",
+                prompt=f"prompt-{index}",
+            )
+            claim_task(queue, "worker", NOW + timedelta(seconds=index))
+            fail_task(
+                queue,
+                task["task_id"],
+                "worker",
+                family,
+                f"diagnosis-{index}",
+                NOW + timedelta(seconds=index),
+            )
+        self.assertTrue(is_lane_paused(queue, "c1", "redraw"))
+        self.assertEqual(
+            queue["paused_lanes"]["c1::redraw"]["diagnosis_record_id"],
+            "diagnosis-2",
         )
 
     def test_three_candidate_failures_with_same_prompt_pause_current_lane(self):
@@ -521,14 +546,14 @@ class TaskQueueTests(unittest.TestCase):
 
     def test_success_clears_lane_streak_but_does_not_reopen_paused_lane(self):
         queue = new_queue()
-        for index in range(2):
+        for index in range(1):
             task = add(queue, str(index + 1), f"f{index}", prompt=f"pf{index}")
             claim_task(queue, "w", NOW)
             fail_task(queue, task["task_id"], "w", "same", f"fr{index}", NOW)
         successful = add(queue, "3", "success", prompt="success")
         claim_task(queue, "w", NOW)
         complete_task(queue, successful["task_id"], "w", "c.png", "sha", NOW)
-        for index in range(2):
+        for index in range(1):
             task = add(queue, str(index + 4), f"g{index}", prompt=f"pg{index}")
             claim_task(queue, "w", NOW)
             fail_task(queue, task["task_id"], "w", "same", f"gr{index}", NOW)
@@ -591,14 +616,14 @@ class TaskQueueTests(unittest.TestCase):
         queue = new_queue()
         expired = add(queue, "9", "leased", cluster_id="c9")
         claim_task(queue, "expiry-worker", NOW, lease_seconds=1)
-        for index in range(3):
+        for index in range(2):
             task = add(queue, str(index + 1), f"a{index}", cluster_id="c1", prompt=f"p{index}")
             claim_task(queue, "w", NOW)
             fail_task(queue, task["task_id"], "w", "same", f"fr{index}", NOW)
         metrics = queue_metrics(queue, NOW + timedelta(seconds=1))
         self.assertEqual(expired["state"], "leased")
         self.assertEqual(metrics["lease_expiry_count"], 1)
-        self.assertAlmostEqual(metrics["repeated_failure_rate"], 2 / 3)
+        self.assertAlmostEqual(metrics["repeated_failure_rate"], 1 / 2)
 
     def test_save_load_revision_conflict_and_corrupt_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:

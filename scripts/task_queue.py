@@ -264,6 +264,7 @@ def _validate_metrics_and_cache(metrics: dict[str, Any], cache: dict[str, Any]) 
         "cache_hits",
         "cache_misses",
         "lane_failure_streaks",
+        "failure_family_attempts",
         "prompt_failure_streaks",
         "retry_counts_by_failure_code",
         "lane_reopen_history",
@@ -282,6 +283,17 @@ def _validate_metrics_and_cache(metrics: dict[str, Any], cache: dict[str, Any]) 
             raise ValueError("lane failure streak must be an object")
         _require_text(record.get("failure_code"), "lane failure_code")
         _nonnegative_int(record.get("count"), "lane failure count")
+
+    family_attempts = metrics["failure_family_attempts"]
+    if not isinstance(family_attempts, dict):
+        raise ValueError("failure_family_attempts must be an object")
+    for lane, families in family_attempts.items():
+        _require_text(lane, "failure family lane")
+        if not isinstance(families, Mapping):
+            raise ValueError("failure family lane must be an object")
+        for family, count in families.items():
+            _require_text(family, "failure family")
+            _nonnegative_int(count, "failure family attempt count")
 
     for field in ("prompt_failure_streaks", "retry_counts_by_failure_code"):
         counts = metrics[field]
@@ -433,6 +445,7 @@ def new_queue(max_active_workers: int = 3) -> dict[str, Any]:
             "cache_hits": 0,
             "cache_misses": 0,
             "lane_failure_streaks": {},
+            "failure_family_attempts": {},
             "prompt_failure_streaks": {},
             "retry_counts_by_failure_code": {},
             "lane_reopen_history": [],
@@ -747,6 +760,7 @@ def complete_task(
     task["candidate"] = {"path": path, "hash": digest}
     lane = _lane_key(task.get("cluster_id"), task["task_type"])
     queue["metrics"].setdefault("lane_failure_streaks", {}).pop(lane, None)
+    queue["metrics"].setdefault("failure_family_attempts", {}).pop(lane, None)
     prompt_hash = task.get("prompt_reference_hash")
     if prompt_hash is not None:
         queue["metrics"].setdefault("prompt_failure_streaks", {}).pop(prompt_hash, None)
@@ -805,6 +819,10 @@ def fail_task(
     previous = lane_streaks.get(lane, {})
     lane_count = previous.get("count", 0) + 1 if previous.get("failure_code") == code else 1
     lane_streaks[lane] = {"failure_code": code, "count": lane_count}
+    family_attempts = queue["metrics"].setdefault("failure_family_attempts", {})
+    lane_families = family_attempts.setdefault(lane, {})
+    family_count = int(lane_families.get(code, 0)) + 1
+    lane_families[code] = family_count
 
     prompt_count = 0
     prompt_hash = task.get("prompt_reference_hash")
@@ -812,14 +830,16 @@ def fail_task(
         prompt_streaks = queue["metrics"].setdefault("prompt_failure_streaks", {})
         prompt_count = int(prompt_streaks.get(prompt_hash, 0)) + 1
         prompt_streaks[prompt_hash] = prompt_count
-    if lane_count >= 3 or prompt_count >= 3:
+    if family_count >= 2 or prompt_count >= 3:
         queue["paused_lanes"].setdefault(
             lane,
             {
                 "cluster_id": task.get("cluster_id"),
                 "task_type": task["task_type"],
-                "reason": "lane_failure_streak" if lane_count >= 3 else "prompt_failure_streak",
+                "reason": "same_family_failure_limit" if family_count >= 2 else "prompt_failure_streak",
                 "failure_code": code,
+                "diagnosis_record_id": record_id,
+                "requires_reviewed_diagnosis": True,
                 "prompt_reference_hash": prompt_hash,
                 "paused_at": failed_at,
             },
@@ -843,6 +863,7 @@ def reopen_lane(
     paused_record = queue["paused_lanes"].pop(lane, None)
     existed = paused_record is not None
     queue["metrics"].setdefault("lane_failure_streaks", {}).pop(lane, None)
+    queue["metrics"].setdefault("failure_family_attempts", {}).pop(lane, None)
     if isinstance(paused_record, Mapping):
         prompt_hash = paused_record.get("prompt_reference_hash")
         if isinstance(prompt_hash, str):

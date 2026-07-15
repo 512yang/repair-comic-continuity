@@ -11,7 +11,7 @@ sys.path.insert(0, str(SCRIPTS))
 from failure_learning import (  # noqa: E402
     FAILURE_CODES,
     new_failure_store,
-    promote_rule,
+    promote_rule as promote_rule_with_evidence,
     record_failure,
     record_outcome,
     revoke_rule,
@@ -22,6 +22,22 @@ from failure_learning import (  # noqa: E402
 
 NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
 SHA = lambda char: char * 64
+
+
+def promote_rule(store, failure_id, scope, **overrides):
+    evidence = {
+        "promoted_by": "independent-reviewer",
+        "positive_regression_passed": True,
+        "positive_regression_artifact_hash": SHA("9"),
+        "clean_control_passed": True,
+        "clean_control_artifact_hash": SHA("8"),
+        "variation_passed": True,
+        "variation_artifact_hash": SHA("7"),
+        "independently_reviewed": True,
+        "independent_review_artifact_hash": SHA("6"),
+    }
+    evidence.update(overrides)
+    return promote_rule_with_evidence(store, failure_id, scope, **evidence)
 
 
 def add_effective_failure(
@@ -61,6 +77,33 @@ def add_effective_failure(
 
 
 class FailureLearningTests(unittest.TestCase):
+    def test_rule_requires_positive_clean_control_variation_and_independent_review(self):
+        store = new_failure_store()
+        failure = add_effective_failure(store, "1", "cluster-a", "a", "b")
+        checks = (
+            ("positive_regression_passed", "positive regression"),
+            ("clean_control_passed", "clean control"),
+            ("variation_passed", "variation"),
+            ("independently_reviewed", "independent review"),
+        )
+        for field, message in checks:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, message):
+                    promote_rule(store, failure["failure_id"], "page", **{field: False})
+        self.assertEqual(store["rules"], [])
+
+    def test_promoted_rule_binds_four_artifact_hashes(self):
+        store = new_failure_store()
+        failure = add_effective_failure(store, "1", "cluster-a", "a", "b")
+        rule = promote_rule(store, failure["failure_id"], "page")
+        self.assertEqual(
+            set(rule["promotion_evidence"]),
+            {"positive_regression", "clean_control", "variation", "independent_review"},
+        )
+        self.assertTrue(all(
+            item["passed"] and len(item["artifact_hash"]) == 64
+            for item in rule["promotion_evidence"].values()
+        ))
     def test_constants_store_and_effective_page_rule_selection(self):
         self.assertEqual(
             FAILURE_CODES,

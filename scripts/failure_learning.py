@@ -134,6 +134,7 @@ def _rule_identity(record: Mapping[str, Any]) -> dict[str, Any]:
         "source_failure_ids": list(record["source_failure_ids"]),
         "source_outcome_ids": list(record["source_outcome_ids"]),
         "source_rule_ids": list(record["source_rule_ids"]),
+        "promotion_evidence": copy.deepcopy(record["promotion_evidence"]),
         "promoted_by": record["promoted_by"],
         "promoted_at": record["promoted_at"],
     }
@@ -430,10 +431,46 @@ def _promotion_evidence(
 
 
 def promote_rule(
-    store: dict[str, Any], failure_id: str, scope: str
+    store: dict[str, Any],
+    failure_id: str,
+    scope: str,
+    *,
+    promoted_by: str,
+    positive_regression_passed: bool,
+    positive_regression_artifact_hash: str,
+    clean_control_passed: bool,
+    clean_control_artifact_hash: str,
+    variation_passed: bool,
+    variation_artifact_hash: str,
+    independently_reviewed: bool,
+    independent_review_artifact_hash: str,
 ) -> dict[str, Any]:
-    """Promote effective evidence through page, cluster, project, and skill scopes."""
+    """Promote a rule only after four independently auditable quality gates."""
     validate_failure_store(store)
+    reviewer = _text(promoted_by, "promoted_by")
+    gate_values = (
+        (
+            "positive regression",
+            positive_regression_passed,
+            positive_regression_artifact_hash,
+        ),
+        ("clean control", clean_control_passed, clean_control_artifact_hash),
+        ("variation", variation_passed, variation_artifact_hash),
+        (
+            "independent review",
+            independently_reviewed,
+            independent_review_artifact_hash,
+        ),
+    )
+    promotion_evidence: dict[str, dict[str, Any]] = {}
+    for label, passed, artifact_hash in gate_values:
+        if passed is not True:
+            raise ValueError(f"{label} must pass before rule promotion")
+        key = label.replace(" ", "_")
+        promotion_evidence[key] = {
+            "passed": True,
+            "artifact_hash": _sha256(artifact_hash, f"{label} artifact_hash"),
+        }
     target_scope = _text(scope, "scope")
     if target_scope not in RULE_SCOPES:
         raise ValueError(f"invalid promotion scope: {target_scope!r}")
@@ -470,7 +507,8 @@ def promote_rule(
         "source_failure_ids": source_failure_ids,
         "source_outcome_ids": source_outcome_ids,
         "source_rule_ids": source_rule_ids,
-        "promoted_by": working_failure["reviewed_by"],
+        "promotion_evidence": promotion_evidence,
+        "promoted_by": reviewer,
         "promoted_at": working_failure["reviewed_at"],
     }
     identifier = _rule_id(rule_identity)
@@ -495,7 +533,7 @@ def promote_rule(
         "from_scope": from_scope,
         "to_scope": target_scope,
         "evidence_ids": event_evidence,
-        "reviewer": working_failure["reviewed_by"],
+        "reviewer": reviewer,
         "timestamp": working_failure["reviewed_at"],
         "reason": None,
     }
@@ -671,7 +709,7 @@ def _validate_rule_record(rule: object, failures: dict[str, dict[str, Any]], rul
         "codes", "corrective_action", "effective", "revoked",
         "revocation_reason", "revoked_by", "revoked_at", "evidence_failure_ids",
         "evidence_rule_ids", "source_failure_ids", "source_outcome_ids", "source_rule_ids",
-        "promoted_by", "promoted_at",
+        "promotion_evidence", "promoted_by", "promoted_at",
     }
     if not isinstance(rule, dict) or not required.issubset(rule):
         raise ValueError("rule record is incomplete")
@@ -726,6 +764,18 @@ def _validate_rule_record(rule: object, failures: dict[str, dict[str, Any]], rul
     )
     if source_outcome_ids != expected_outcome_ids:
         raise ValueError("rule outcome evidence does not match source failures")
+    promotion_evidence = rule["promotion_evidence"]
+    required_gates = {
+        "positive_regression", "clean_control", "variation", "independent_review"
+    }
+    if not isinstance(promotion_evidence, dict) or set(promotion_evidence) != required_gates:
+        raise ValueError("rule promotion evidence must contain all four quality gates")
+    for name, evidence in promotion_evidence.items():
+        if not isinstance(evidence, dict) or set(evidence) != {"passed", "artifact_hash"}:
+            raise ValueError(f"{name} promotion evidence is invalid")
+        if evidence["passed"] is not True:
+            raise ValueError(f"{name} promotion evidence must pass")
+        _sha256(evidence["artifact_hash"], f"{name} artifact_hash")
     if not isinstance(rule["effective"], bool) or not isinstance(rule["revoked"], bool):
         raise ValueError("rule state flags must be booleans")
     _text(rule["promoted_by"], "promoted_by")
