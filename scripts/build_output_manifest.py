@@ -11,6 +11,7 @@ from pathlib import Path
 from pipeline_contracts import canonical_hash, make_output_names
 from failure_learning import new_failure_store
 from task_queue import new_queue, queue_registry_hash
+from pipeline_version import EVIDENCE_PIPELINE_ID, EVIDENCE_SCHEMA_VERSION
 from project_common import (
     atomic_write_json,
     discover_project,
@@ -104,8 +105,8 @@ CONTINUITY_LOCK_FIELDS = frozenset(
         "confirmed", "reviewer", "reviewed_at",
     }
 )
-PIPELINE_MODE = "continuity_v4"
-SCHEMA_VERSION = "4.0"
+PIPELINE_MODE = EVIDENCE_PIPELINE_ID
+SCHEMA_VERSION = EVIDENCE_SCHEMA_VERSION
 
 
 def partition_batch_sizes(page_count: int) -> list[int]:

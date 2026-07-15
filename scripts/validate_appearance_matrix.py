@@ -11,7 +11,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 
-TRAITS = ("skin_tone", "hair", "facial_hair", "clothing")
+TRAITS = (
+    "skin_tone",
+    "hair",
+    "facial_hair",
+    "clothing",
+    "face_shape",
+    "body_build",
+)
 OBSERVATION_STATES = {"match", "drift", "not_visible"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 

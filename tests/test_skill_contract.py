@@ -13,7 +13,7 @@ def read(relative_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-class ContinuityV4SkillContractTests(unittest.TestCase):
+class ContinuityV5SkillContractTests(unittest.TestCase):
     def test_required_v4_phrases_are_public(self):
         required_phrases = {
             "SKILL.md": [
@@ -103,11 +103,55 @@ class ContinuityV4SkillContractTests(unittest.TestCase):
         self.assertIn("must not rebuild evidence", skill)
         self.assertIn("V3 migration output is diagnostic only", skill)
 
-    def test_ui_metadata_describes_v4_without_shortcut(self):
+    def test_ui_metadata_uses_unified_v5_entrypoint_without_shortcut(self):
         metadata = read("agents/openai.yaml")
-        self.assertIn("漫画连续性修复 V4", metadata)
-        self.assertIn("continuity_v4", metadata)
+        self.assertIn("漫画连续性修复 V5", metadata)
+        self.assertIn("continuity_v5_unified", metadata)
+        self.assertNotIn('default_prompt: "使用 $repair-comic-continuity 按 continuity_v4', metadata)
         self.assertIn("先审核再修复", metadata)
+
+    def test_production_entrypoint_requires_isolated_run_and_benchmark_gate(self):
+        skill = read("SKILL.md")
+        for phrase in (
+            "scripts/prepare_run_workspace.py",
+            "scripts/validate_detection_benchmark.py",
+            "isolated run root",
+            "zero missed confirmed defects",
+            "correct-page protection",
+            "scripts/validate_source_text_audit.py",
+            "every adjacent Chinese repeat",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
+    def test_production_promotion_and_release_are_machine_gated(self):
+        skill = read("SKILL.md")
+        for phrase in (
+            "scripts/promote_outputs.py",
+            "scripts/release_gate.py",
+            "unchanged pages are copied only from sealed input",
+            "provisional until the release gate passes",
+            "never trust a self-reported passed or accepted string",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
+    def test_source_text_audit_cannot_skip_malformed_glyph_shapes(self):
+        documents = read("SKILL.md") + "\n" + read("references/qa-checklist.md")
+        for phrase in (
+            "source glyph board",
+            "every ordinary-text block",
+            "explicit non-OCR-only shape decision for every occurrence of 强 and 遇",
+            "page cannot be classified",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
+    def test_appearance_gate_includes_identity_geometry_not_only_color_and_costume(self):
+        documents = read("SKILL.md") + "\n" + read("references/continuity-rules.md")
+        for phrase in ("face shape", "body build"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
 
 
 if __name__ == "__main__":

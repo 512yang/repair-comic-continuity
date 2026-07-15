@@ -20,6 +20,8 @@ def valid_matrix():
             "entity_id": "邓正虎",
             "reference": {"path": "人物参考图/邓正虎.png", "sha256": "a" * 64},
             "baseline": {
+                "face_shape": "wide face",
+                "body_build": "strong build",
                 "skin_tone": "暖调中浅肤色",
                 "hair": "黑色高马尾",
                 "facial_hair": "无",
@@ -30,6 +32,8 @@ def valid_matrix():
                 "page": page,
                 "present": True,
                 "full_resolution": True,
+                "face_shape": "match",
+                "body_build": "match",
                 "skin_tone": "match",
                 "hair": "match",
                 "facial_hair": "match",
@@ -61,6 +65,17 @@ class AppearanceMatrixTests(unittest.TestCase):
         matrix = valid_matrix()
         matrix["characters"][0]["reference"]["path"] = ""
         with self.assertRaisesRegex(ValueError, "reference.path"):
+            validate_matrix(matrix)
+
+    def test_face_shape_and_body_build_are_mandatory_and_drift_blocks_confirmation(self):
+        matrix = valid_matrix()
+        del matrix["characters"][0]["baseline"]["face_shape"]
+        with self.assertRaisesRegex(ValueError, "baseline must contain exactly"):
+            validate_matrix(matrix)
+
+        matrix = valid_matrix()
+        matrix["characters"][0]["observations"][1]["body_build"] = "drift"
+        with self.assertRaisesRegex(ValueError, "body_build drift"):
             validate_matrix(matrix)
 
     def test_not_visible_is_allowed_only_when_character_is_absent(self):

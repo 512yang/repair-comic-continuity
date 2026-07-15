@@ -14,7 +14,7 @@ Character sheets define identity, not comic rendering style. A reviewed comic pa
 
 ## Character appearance matrix
 
-Before page classification, build one `character_appearance_matrix.json` per semantic cluster and validate it with `scripts/validate_appearance_matrix.py`. Bind every named character to the exact identity-reference hash and list every owned cluster page in order. For every page, inspect the full-resolution face plus any visible neck, chest, and arms; record `match`, `drift`, or `not_visible` for skin tone, hair, facial hair, and clothing.
+Before page classification, build one `character_appearance_matrix.json` per semantic cluster and validate it with `scripts/validate_appearance_matrix.py`. Bind every named character to the exact identity-reference hash and list every owned cluster page in order. For every page, inspect the full-resolution face plus any visible neck, chest, and arms; record `match`, `drift`, or `not_visible` for skin tone, hair, facial hair, clothing, face shape, and body build.
 
 Use the character reference as the identity baseline. Water, shadow, mood lighting, and watercolor texture may shift local color, but they do not justify a change of skin-tone category or undertone across one continuous scene. Record a concrete lighting explanation for every observation. A visible character cannot use `not_visible`; an unobserved page, missing reference, missing crop evidence, or any unresolved drift blocks confirmation and page promotion.
 

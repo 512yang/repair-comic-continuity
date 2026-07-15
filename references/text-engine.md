@@ -16,6 +16,7 @@ LaMa model weights are a runtime cache, not a second project. Resolve them in th
 Use `page_reset_preserve_style` for ordinary text:
 
 1. Inspect the full-resolution source page and inventory every ordinary-text region. Keep reviewed SFX and art text separate.
+   Before page classification, validate the hash-bound source audit with `scripts/validate_source_text_audit.py`; machine and independent visual block inventories must match, source crops must pixel-match the current page, adjacent Chinese repeats must be explicitly reviewed, and every block must bind exact novel offsets plus a semantic decision.
 2. Bind each region to page, panel, speaker, balloon, bbox, original line boxes, reading order, OCR evidence, source text, replacement text, and novel offsets.
 3. Analyze the source crop with the embedded style analyzer and font matcher. Build `style_lock` with font family, font asset hash, confidence, fill/stroke RGBA, font size, stroke width, letter/line spacing, writing mode, alignment, rotation, anchor, and line boxes.
 4. Require style and font confidence of at least `0.95` with no fallback. Otherwise mark `evidence_blocked` and request full-resolution review; do not guess.

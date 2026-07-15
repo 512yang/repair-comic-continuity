@@ -40,6 +40,7 @@ from entity_timeline import validate_timeline
 from evidence_integrity import validate_v4_integrity
 from failure_learning import validate_failure_store
 from pipeline_contracts import canonical_hash, normalize_page_id, normalize_relative_image_path
+from pipeline_version import EVIDENCE_PIPELINE_ID, EVIDENCE_SCHEMA_VERSION
 from task_queue import load_queue
 from scene_clusters import build_reference_pack, validate_reference_pack
 
@@ -151,9 +152,9 @@ def _validate_v4_project(
     except ValueError as exc:
         errors.append(str(exc))
 
-    if run.get("schema_version") != "4.0" or run.get("pipeline_mode") != "continuity_v4":
+    if run.get("schema_version") != EVIDENCE_SCHEMA_VERSION or run.get("pipeline_mode") != EVIDENCE_PIPELINE_ID:
         errors.append("FINAL_REPORT_STATE_MISMATCH")
-    if repair.get("schema_version") != "4.0" or repair.get("pipeline_mode") != "continuity_v4":
+    if repair.get("schema_version") != EVIDENCE_SCHEMA_VERSION or repair.get("pipeline_mode") != EVIDENCE_PIPELINE_ID:
         errors.append("FINAL_REPORT_STATE_MISMATCH")
     if run.get("evidence_files") != list(EVIDENCE_FILES) or repair.get("evidence_files") != list(EVIDENCE_FILES):
         errors.append("FINAL_REPORT_STATE_MISMATCH")

@@ -4,7 +4,7 @@
 
 - Confirm the novel hash, offsets, scene summary, cast, dialogue owners, props, location, and time for every page.
 - Confirm semantic cluster membership, complete reference roles, stable comic anchors, and entity timeline transitions.
-- Validate `character_appearance_matrix.json`; require exact cluster-page coverage and full-resolution, reference-bound checks for skin tone, hair, facial hair, and clothing for every named character.
+- Validate `character_appearance_matrix.json`; require exact cluster-page coverage and full-resolution, reference-bound checks for skin tone, hair, facial hair, clothing, face shape, and body build for every named character.
 - Require two independent full-resolution audits and resolve any routed second review.
 - Treat contact sheets as orientation only.
 
@@ -20,6 +20,8 @@
 ## Text review
 
 - Compare each block with its novel-backed source slice and speaker.
+- Build a full-resolution source glyph board that exactly covers every ordinary-text block before page classification. Require an explicit non-OCR-only shape decision for every occurrence of 强 and 遇; if any block or occurrence is missing, the page cannot be classified.
+- Validate every page's `source_text_audit` with exact independent machine/visual block inventories and transcriptions, source-crop pixel binding, exact hash-bound novel offsets and semantic decisions, and explicit review of every adjacent Chinese repeat; an empty inventory needs a third independent full-resolution textless review, and a prose assertion of full inspection is not sufficient evidence.
 - Preserve the original geometry, reading order, balloon style, and density.
 - Compare every rendered block with its source `style_lock`: font asset, fill/stroke color, font size, spacing, writing mode, alignment, rotation, anchor, and original line boxes must match exactly.
 - Reject font fallback, confidence below `0.95`, changed line count, silent shrink/reflow, `text_overflow`, or any newly created balloon.
