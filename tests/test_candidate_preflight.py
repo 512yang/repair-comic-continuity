@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib
 import sys
 import tempfile
@@ -57,6 +58,10 @@ def draw_pattern(path, *, size=(896, 1200), variant="normal"):
     return path
 
 
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 class CandidatePreflightTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -75,6 +80,143 @@ class CandidatePreflightTests(unittest.TestCase):
             ocr_metadata=VALID_OCR,
             **overrides,
         )
+
+    def make_text_candidate(self, *, outside_change=False):
+        original = self.root / "text-original.png"
+        candidate = self.root / "text-candidate.png"
+        mask = self.root / "text-mask.png"
+        base = Image.new("RGB", (64, 64), (235, 230, 215))
+        draw = ImageDraw.Draw(base)
+        draw.rectangle((4, 4, 59, 59), outline=(30, 30, 30), width=2)
+        draw.ellipse((20, 18, 44, 42), fill=(160, 120, 90))
+        base.save(original)
+        edited = base.copy()
+        edited_draw = ImageDraw.Draw(edited)
+        edited_draw.rectangle((8, 46, 30, 56), fill=(20, 20, 20))
+        if outside_change:
+            edited_draw.point((55, 8), fill=(255, 0, 0))
+        edited.save(candidate)
+        mask_image = Image.new("L", base.size, 0)
+        ImageDraw.Draw(mask_image).rectangle((7, 45, 31, 57), fill=255)
+        mask_image.save(mask)
+        inventory_body = {
+            "source_page_sha256": sha256(original),
+            "ordinary_text": True,
+            "regions": [
+                {
+                    "region_id": "region-1",
+                    "bbox": [7, 45, 32, 58],
+                    "source_balloon_exists": True,
+                }
+            ],
+        }
+        inventory = {
+            **inventory_body,
+            "inventory_sha256": canonical_hash(inventory_body),
+        }
+        declaration_body = {
+            "source_page": {
+                "path": "章节/0003.png",
+                "sha256": sha256(original),
+                "width": 64,
+                "height": 64,
+            },
+            "source_text_inventory": inventory,
+            "source_has_ordinary_text": True,
+            "blocks": [
+                {
+                    "block_id": "dialogue-1",
+                    "source_region_id": "region-1",
+                    "bbox": [7, 45, 32, 58],
+                }
+            ],
+            "only_declared_blocks": True,
+        }
+        declaration = {
+            **declaration_body,
+            "declaration_hash": canonical_hash(declaration_body),
+        }
+        return original, candidate, {
+            "path": str(mask),
+            "sha256": sha256(mask),
+            "mode": "L",
+            "width": 64,
+            "height": 64,
+        }, declaration
+
+    def test_text_only_candidate_rejects_pixels_changed_outside_mask(self):
+        module = candidate_preflight()
+        original, candidate, change_mask, declaration = self.make_text_candidate(
+            outside_change=True
+        )
+
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=change_mask,
+            text_declaration=declaration,
+        )
+
+        self.assertEqual(
+            report["checks"]["outside_mask_preserved"]["status"], "fail"
+        )
+
+    def test_review_requires_full_resolution_artifacts_and_candidate_time_order(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(
+            self.candidate,
+            self.original,
+            page_class="unchanged",
+        )
+
+        with self.assertRaisesRegex(ValueError, "review artifact"):
+            module.record_independent_review(
+                report,
+                generator="worker-1",
+                reviewer="reviewer-2",
+                decision="accepted",
+                reviewed_at="2026-07-14T20:00:00+00:00",
+                candidate_created_at="2026-07-14T19:00:00+00:00",
+                review_artifacts=[],
+                blind=True,
+            )
+
+    def test_text_candidate_requires_visual_glyph_review(self):
+        module = candidate_preflight()
+        original, candidate, change_mask, declaration = self.make_text_candidate()
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=change_mask,
+            text_declaration=declaration,
+        )
+        board = self.root / "glyph-board.png"
+        Image.new("RGB", (64, 64), "white").save(board)
+
+        with self.assertRaisesRegex(ValueError, "glyph review"):
+            module.record_independent_review(
+                report,
+                generator="text-worker-1",
+                reviewer="glyph-reviewer-2",
+                decision="accepted",
+                reviewed_at="2026-07-14T20:00:00+00:00",
+                candidate_created_at="2026-07-14T19:00:00+00:00",
+                review_artifacts=[
+                    {
+                        "path": str(board),
+                        "sha256": sha256(board),
+                        "kind": "full_resolution",
+                        "candidate_sha256": report["hashes"]["candidate"],
+                        "preflight_id": report["preflight_id"],
+                    }
+                ],
+                blind=True,
+                glyph_review=None,
+            )
 
     def test_normal_candidate_passes_with_complete_deterministic_report(self):
         module = candidate_preflight()
