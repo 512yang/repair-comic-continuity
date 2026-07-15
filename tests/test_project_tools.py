@@ -29,6 +29,8 @@ from inventory_project import inventory_project
 import build_output_manifest as manifest_module
 from build_output_manifest import EVIDENCE_FILES, build_manifests
 from failure_learning import new_failure_store
+from entity_timeline import build_timeline
+from evidence_integrity import build_event_chain
 from pipeline_contracts import canonical_hash, normalize_page_id
 from scene_clusters import bind_reference_pack, build_reference_pack, build_scene_clusters
 from task_queue import (
@@ -709,6 +711,181 @@ class ComicContinuityToolsTests(unittest.TestCase):
         for page in repair["pages"]:
             for key, value in neutral_fields.items():
                 self.assertEqual(value, page[key])
+
+    def test_v4_final_validator_preserves_exact_input_names_and_rejects_renaming(self):
+        for name, color in (("1.jpg", "white"), ("chapter/2.PNG", "gray")):
+            self.add_page(name, color=color)
+        evidence = self.root / "璇佹嵁"
+        build_manifests(self.root, evidence)
+        project = discover_project(self.root)
+        input_names = ["1.jpg", "chapter/2.PNG"]
+        for name in input_names:
+            target = project.output_dir / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(project.input_dir / name, target)
+
+        def load(name):
+            return json.loads((evidence / name).read_text(encoding="utf-8"))
+
+        def save_registry(name, value):
+            value.pop("registry_hash", None)
+            atomic_write_json(evidence / name, with_registry_hash(value))
+
+        queue = new_queue()
+        queue["status"] = "passed"
+        task_ids = []
+        output_hashes = []
+        for index, name in enumerate(input_names):
+            output_hash = sha256_file(project.output_dir / name)
+            output_hashes.append(output_hash)
+            task = add_task(
+                queue, name, "continuity_check", f"payload-{index}",
+                cluster_id="cluster-1", prompt_reference_hash="refs-1",
+                now=f"2026-07-15T08:0{index}:00+08:00",
+            )
+            claim_task(queue, f"generator-{index}", f"2026-07-15T08:0{index + 2}:00+08:00")
+            complete_task(
+                queue, task["task_id"], f"generator-{index}", name, output_hash,
+                f"2026-07-15T08:0{index + 4}:00+08:00",
+            )
+            task_ids.append(task["task_id"])
+        save_registry("task_queue.json", queue)
+
+        run = load("comic_run_manifest.json")
+        run["status"] = "passed"
+        repair = load("repair_log.json")
+        repair["status"] = "passed"
+        for index, name in enumerate(input_names):
+            run["pages"][index].update(
+                output_sha256=output_hashes[index], cluster_id="cluster-1",
+                task_id=task_ids[index], page_class="unchanged",
+                generated_by=f"generator-{index}", reviewed_by=f"reviewer-{index}",
+                state="passed",
+            )
+            repair["pages"][index].update(
+                cluster_id="cluster-1", task_id=task_ids[index],
+                page_class="unchanged", generated_by=f"generator-{index}",
+                reviewed_by=f"reviewer-{index}", action="unchanged_copy",
+            )
+        atomic_write_json(evidence / "comic_run_manifest.json", run)
+        atomic_write_json(evidence / "repair_log.json", repair)
+
+        alignment = load("novel_alignment.json")
+        alignment["status"] = "passed"
+        for index, row in enumerate(alignment["pages"]):
+            row.update(
+                status="confirmed", start_offset=index * 10,
+                end_offset=index * 10 + 9, involved_characters=["hero"],
+            )
+        atomic_write_json(evidence / "novel_alignment.json", alignment)
+        bible = load("continuity_bible.json")
+        bible["status"] = "passed"
+        atomic_write_json(evidence / "continuity_bible.json", bible)
+
+        scene_clusters = load("scene_clusters.json")
+        scene_clusters.update(
+            status="passed",
+            clusters=[{"cluster_id": "cluster-1", "member_pages": input_names}],
+        )
+        save_registry("scene_clusters.json", scene_clusters)
+        packs = load("style_reference_packs.json")
+        packs.update(
+            status="passed",
+            stable_pages=[{"path": "1.jpg", "sha256": output_hashes[0]}],
+            reference_packs=[{
+                "reference_pack_id": "pack-1",
+                "references": [{"role": "identity_only", "subject": "hero"}],
+            }],
+        )
+        save_registry("style_reference_packs.json", packs)
+
+        failure = load("failure_learning.json")
+        failure["status"] = "passed"
+        save_registry("failure_learning.json", failure)
+        cluster_qa = load("scene_cluster_qa.json")
+        cluster_qa.update(
+            status="passed",
+            clusters=[{
+                "cluster_id": "cluster-1", "status": "passed",
+                "reviewed_at": "2026-07-15T08:20:00+08:00",
+            }],
+        )
+        save_registry("scene_cluster_qa.json", cluster_qa)
+
+        timeline = build_timeline(
+            [
+                {"entity_type": "character", "entity_id": "hero", "page": name, "state": {"hair": "black"}}
+                for name in input_names
+            ],
+            [],
+        )
+        timeline["status"] = "passed"
+        save_registry("entity_state_timeline.json", timeline)
+
+        audit_doc = load("page_audit.json")
+        audit_doc["status"] = "passed"
+        audit_doc["pages"] = []
+        for index, name in enumerate(input_names):
+            audit_doc["pages"].append(
+                {
+                    "page": name,
+                    "decision": "unchanged",
+                    "preflight_status": "accepted",
+                    "audits": [
+                        {
+                            "reviewed_at": f"2026-07-15T08:1{index}:00+08:00",
+                            "artifact": {
+                                "path": f"{project.output_dir.relative_to(self.root).as_posix()}/{name}", "sha256": output_hashes[index],
+                                "kind": "full_resolution_page",
+                            },
+                        },
+                        {
+                            "reviewed_at": f"2026-07-15T08:1{index + 2}:00+08:00",
+                            "artifact": {
+                                "path": f"{project.output_dir.relative_to(self.root).as_posix()}/{name}", "sha256": output_hashes[index],
+                                "kind": "full_resolution_page",
+                            },
+                        },
+                    ],
+                }
+            )
+        save_registry("page_audit.json", audit_doc)
+        for filename in ("text_geometry.json", "regression_summary.json"):
+            document = load(filename)
+            document["status"] = "passed"
+            if filename == "regression_summary.json":
+                document["unresolved_issues"] = 0
+            save_registry(filename, document)
+
+        events = build_event_chain(
+            [
+                {"event_type": "candidate_created", "page": name, "actor": f"generator-{index}", "timestamp": f"2026-07-15T08:0{index + 4}:00+08:00"}
+                for index, name in enumerate(input_names)
+            ]
+            + [
+                {"event_type": "page_reviewed", "page": name, "actor": f"reviewer-{index}", "timestamp": f"2026-07-15T08:1{index + 2}:00+08:00"}
+                for index, name in enumerate(input_names)
+            ]
+            + [
+                {"event_type": "cluster_qa", "cluster": "cluster-1", "actor": "cluster-reviewer", "timestamp": "2026-07-15T08:20:00+08:00"},
+                {"event_type": "final_report", "actor": "final-reviewer", "timestamp": "2026-07-15T08:30:00+08:00"},
+            ]
+        )
+        (evidence / "review_events.jsonl").write_bytes(
+            "".join(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for event in events).encode("utf-8")
+        )
+        (evidence / "FINAL_QA_REPORT.md").write_text(
+            "# FINAL QA REPORT\n\nstatus: passed\nreviewer: final-reviewer\n"
+            "reviewed_at: 2026-07-15T08:30:00+08:00\nunresolved_issues: 0\n",
+            encoding="utf-8",
+        )
+
+        accepted = validate_project(self.root, evidence)
+        self.assertTrue(accepted["ok"], accepted["errors"])
+        renamed = project.output_dir / "0001.jpg"
+        (project.output_dir / "1.jpg").rename(renamed)
+        rejected = validate_project(self.root, evidence)
+        self.assertIn("OUTPUT_NAME_SET_MISMATCH", rejected["errors"])
 
     def test_manifest_derives_three_hundred_exact_output_names(self):
         for number in range(1, 301):

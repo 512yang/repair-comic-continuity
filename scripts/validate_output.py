@@ -35,13 +35,285 @@ from project_common import (
     sorted_input_pages,
     verify_readable_image,
 )
+from audit_evidence import validate_review_log
+from entity_timeline import validate_timeline
+from evidence_integrity import validate_v4_integrity
 from failure_learning import validate_failure_store
-from pipeline_contracts import canonical_hash, normalize_page_id
+from pipeline_contracts import canonical_hash, normalize_page_id, normalize_relative_image_path
 from task_queue import load_queue
 from scene_clusters import build_reference_pack, validate_reference_pack
 
 
 SCENE_CLUSTER_PIPELINE_MODE = "scene_cluster_v1"
+
+
+def _v4_report_values(path: Path, errors: list[str]) -> dict[str, str]:
+    if not path.is_file():
+        errors.append("evidence file missing: FINAL_QA_REPORT.md")
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        errors.append(f"invalid FINAL_QA_REPORT.md: {exc}")
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([a-z_]+):\s*(.*?)\s*", line)
+        if match:
+            values[match.group(1)] = match.group(2)
+    return values
+
+
+def _validate_v4_project(
+    project: Any,
+    evidence: Path,
+    input_pages: list[Path],
+    expected_count: int,
+    run: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble final integrity facts from V4 registries; never rebuild evidence."""
+    errors: list[str] = []
+    counts = {
+        "expected": expected_count,
+        "input": len(input_pages),
+        "output": 0,
+        "manifest": len(run.get("pages", [])) if isinstance(run.get("pages"), list) else 0,
+    }
+    input_names = [page.relative_to(project.input_dir).as_posix() for page in input_pages]
+    output_files = sorted(
+        path for path in project.output_dir.rglob("*")
+        if path.is_file() and path.suffix.casefold() in INPUT_PAGE_EXTENSIONS
+    )
+    discovered_output_names = [
+        path.relative_to(project.output_dir).as_posix() for path in output_files
+    ]
+    discovered_output_set = set(discovered_output_names)
+    output_names = [name for name in input_names if name in discovered_output_set]
+    output_names.extend(
+        sorted(name for name in discovered_output_names if name not in set(input_names))
+    )
+    counts["output"] = len(output_files)
+    if len(output_files) != expected_count:
+        errors.append(
+            f"output count mismatch: expected {expected_count}, found {len(output_files)}"
+        )
+    non_image_files = [path for path in project.output_dir.rglob("*") if path.is_file() and path not in output_files]
+    if non_image_files:
+        errors.append("OUTPUT_NAME_SET_MISMATCH")
+    for output in output_files:
+        try:
+            verify_readable_image(output)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    documents: dict[str, dict[str, Any] | None] = {"comic_run_manifest": run}
+    filenames = {
+        "continuity_bible": "continuity_bible.json",
+        "novel_alignment": "novel_alignment.json",
+        "repair_log": "repair_log.json",
+        "scene_clusters": "scene_clusters.json",
+        "style_reference_packs": "style_reference_packs.json",
+        "task_queue": "task_queue.json",
+        "failure_learning": "failure_learning.json",
+        "scene_cluster_qa": "scene_cluster_qa.json",
+        "entity_state_timeline": "entity_state_timeline.json",
+        "page_audit": "page_audit.json",
+        "text_geometry": "text_geometry.json",
+        "regression_summary": "regression_summary.json",
+    }
+    for label, filename in filenames.items():
+        documents[label] = _load_json(evidence / filename, errors)
+
+    for label in (
+        "scene_clusters", "style_reference_packs", "task_queue", "failure_learning",
+        "scene_cluster_qa", "entity_state_timeline", "page_audit", "text_geometry",
+        "regression_summary",
+    ):
+        _validate_registry_hash(documents[label], label, errors)
+
+    alignment = documents["novel_alignment"] or {}
+    repair = documents["repair_log"] or {}
+    bible = documents["continuity_bible"] or {}
+    clusters_doc = documents["scene_clusters"] or {}
+    packs_doc = documents["style_reference_packs"] or {}
+    queue = documents["task_queue"] or {}
+    cluster_qa = documents["scene_cluster_qa"] or {}
+    timeline = documents["entity_state_timeline"] or {}
+    audits = documents["page_audit"] or {}
+    regression = documents["regression_summary"] or {}
+
+    try:
+        queue = load_queue(evidence / "task_queue.json")
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        validate_failure_store(documents["failure_learning"] or {})
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    if run.get("schema_version") != "4.0" or run.get("pipeline_mode") != "continuity_v4":
+        errors.append("FINAL_REPORT_STATE_MISMATCH")
+    if repair.get("schema_version") != "4.0" or repair.get("pipeline_mode") != "continuity_v4":
+        errors.append("FINAL_REPORT_STATE_MISMATCH")
+    if run.get("evidence_files") != list(EVIDENCE_FILES) or repair.get("evidence_files") != list(EVIDENCE_FILES):
+        errors.append("FINAL_REPORT_STATE_MISMATCH")
+
+    run_pages = run.get("pages") if isinstance(run.get("pages"), list) else []
+    repair_pages = repair.get("pages") if isinstance(repair.get("pages"), list) else []
+    alignments = alignment.get("pages") if isinstance(alignment.get("pages"), list) else []
+    audit_pages = audits.get("pages") if isinstance(audits.get("pages"), list) else []
+    task_map = {
+        task.get("task_id"): task
+        for task in queue.get("tasks", [])
+        if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+    }
+    audit_map = {
+        row.get("page"): row
+        for row in audit_pages
+        if isinstance(row, dict) and isinstance(row.get("page"), str)
+    }
+    output_hashes = {
+        path.relative_to(project.output_dir).as_posix(): sha256_file(path)
+        for path in output_files
+    }
+    page_rows: list[dict[str, Any]] = []
+    full_reviews: list[dict[str, Any]] = []
+    for index, name in enumerate(input_names):
+        run_row = run_pages[index] if index < len(run_pages) and isinstance(run_pages[index], dict) else {}
+        repair_row = repair_pages[index] if index < len(repair_pages) and isinstance(repair_pages[index], dict) else {}
+        audit_row = audit_map.get(name, {})
+        task = task_map.get(repair_row.get("task_id"), {})
+        audit_records = audit_row.get("audits") if isinstance(audit_row.get("audits"), list) else []
+        review_times = [_parse_zoned_datetime(row.get("reviewed_at")) for row in audit_records if isinstance(row, dict)]
+        review_times = [value for value in review_times if value is not None]
+        reviewed_at = max(review_times).isoformat() if review_times else audit_row.get("reviewed_at")
+        artifact_ok = True
+        artifact_hash = None
+        for record in audit_records:
+            artifact = record.get("artifact", {}) if isinstance(record, dict) else {}
+            artifact_path = artifact.get("path")
+            digest = artifact.get("sha256")
+            try:
+                resolved = project.root / normalize_relative_image_path(artifact_path)
+                current_hash = sha256_file(resolved)
+            except (OSError, ValueError, TypeError):
+                artifact_ok = False
+            else:
+                artifact_ok = artifact_ok and current_hash == digest
+                artifact_hash = digest
+        if len(audit_records) != 2:
+            artifact_ok = False
+        full_reviews.append(
+            {
+                "page": name,
+                "full_size": len(audit_records) == 2 and all(
+                    isinstance(row, dict) and row.get("artifact", {}).get("kind") == "full_resolution_page"
+                    for row in audit_records
+                ),
+                "artifact_exists": artifact_ok,
+                "artifact_hash": artifact_hash,
+            }
+        )
+        candidate_created = task.get("completed_at") or task.get("timestamps", {}).get("completed_at")
+        page_rows.append(
+            {
+                "page": name,
+                "cluster_id": repair_row.get("cluster_id"),
+                "page_class": repair_row.get("page_class"),
+                "generator": repair_row.get("generated_by"),
+                "reviewer": repair_row.get("reviewed_by"),
+                "candidate_created_at": candidate_created,
+                "reviewed_at": reviewed_at,
+                "audit_status": "resolved" if audit_row.get("decision") == repair_row.get("page_class") else audit_row.get("status"),
+                "preflight_status": audit_row.get("preflight_status"),
+                "task_status": task.get("state"),
+            }
+        )
+        if (
+            run_row.get("input_name") != name
+            or run_row.get("output_name") != name
+            or repair_row.get("output_name") != name
+            or run_row.get("input_sha256") != sha256_file(input_pages[index])
+            or run_row.get("output_sha256") != output_hashes.get(name)
+        ):
+            errors.append("OUTPUT_NAME_SET_MISMATCH")
+
+    required_cast = sorted(
+        {
+            character
+            for row in alignments
+            if isinstance(row, dict) and isinstance(row.get("involved_characters"), list)
+            for character in row["involved_characters"]
+            if isinstance(character, str) and character
+        }
+    )
+    reference_packs = []
+    for pack in packs_doc.get("reference_packs", []):
+        if not isinstance(pack, dict):
+            continue
+        cast = sorted(
+            {
+                row.get("subject")
+                for row in pack.get("references", [])
+                if isinstance(row, dict)
+                and row.get("role") in {"identity_only", "comic_style_anchor"}
+                and isinstance(row.get("subject"), str)
+            }
+        )
+        reference_packs.append({"pack_id": pack.get("reference_pack_id"), "cast": cast})
+
+    try:
+        events = validate_review_log(evidence / "review_events.jsonl")
+    except ValueError as exc:
+        errors.append(str(exc))
+        events = []
+    try:
+        validate_timeline(
+            {
+                key: value
+                for key, value in timeline.items()
+                if key not in {"status", "registry_hash"}
+            }
+        )
+        timeline_supported = True
+    except ValueError as exc:
+        errors.append(str(exc))
+        timeline_supported = False
+
+    report = _v4_report_values(evidence / "FINAL_QA_REPORT.md", errors)
+    statuses = {
+        label: (document or {}).get("status")
+        for label, document in documents.items()
+        if label in {
+            "scene_clusters", "style_reference_packs", "task_queue", "failure_learning",
+            "scene_cluster_qa", "entity_state_timeline", "page_audit", "text_geometry",
+            "regression_summary",
+        }
+    }
+    summary = {
+        "schema_version": run.get("schema_version"),
+        "pipeline_mode": run.get("pipeline_mode"),
+        "input_names": input_names,
+        "output_names": output_names,
+        "alignments": alignments,
+        "full_size_reviews": full_reviews,
+        "required_cast": required_cast,
+        "reference_packs": reference_packs,
+        "stable_pages": packs_doc.get("stable_pages"),
+        "timeline_supported": timeline_supported,
+        "events": events,
+        "pages": page_rows,
+        "clusters": cluster_qa.get("clusters"),
+        "registry_statuses": statuses,
+        "final_status": report.get("status"),
+        "final_reviewed_at": report.get("reviewed_at"),
+        "unresolved_issues": regression.get("unresolved_issues"),
+    }
+    errors.extend(code for code in validate_v4_integrity(summary) if code not in errors)
+    if any((document or {}).get("status") != "passed" for document in (run, repair, alignment, bible)):
+        if "FINAL_REPORT_STATE_MISMATCH" not in errors:
+            errors.append("FINAL_REPORT_STATE_MISMATCH")
+    return {"ok": not errors, "errors": errors, "counts": counts}
 
 
 def _load_json(path: Path, errors: list[str]) -> dict[str, Any] | None:
@@ -1036,6 +1308,21 @@ def validate_project(
         )
     counts["expected"] = expected_count
     counts["input"] = actual_count
+
+    preload_errors: list[str] = []
+    preloaded_run = _load_json(evidence / "comic_run_manifest.json", preload_errors)
+    if (
+        preloaded_run is not None
+        and preloaded_run.get("schema_version") == "4.0"
+        and preloaded_run.get("pipeline_mode") == "continuity_v4"
+    ):
+        result = _validate_v4_project(
+            project, evidence, input_pages, expected_count, preloaded_run
+        )
+        if preload_errors:
+            result["errors"] = preload_errors + result["errors"]
+            result["ok"] = False
+        return result
 
     output_entries = sorted(project.output_dir.iterdir(), key=lambda path: path.name)
     output_pages = sorted(
