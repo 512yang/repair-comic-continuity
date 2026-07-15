@@ -2632,3 +2632,17 @@ def compile_text_repair_request(spec: Mapping[str, Any]) -> dict[str, Any]:
         "cluster_id": normalized["cluster_id"],
         "mode": normalized["mode"],
     }
+
+
+def validate_v4_text_repair_request(
+    spec: Mapping[str, Any], request: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Recompile and exactly verify a complete Task 7 V4 text request."""
+    if not isinstance(spec, Mapping) or spec.get("contract_version") != "v4":
+        raise ValueError("Task 7 text spec must use contract_version v4")
+    if not isinstance(request, Mapping):
+        raise ValueError("Task 7 text request must be a mapping")
+    expected = compile_text_repair_request(spec)
+    if dict(request) != expected:
+        raise ValueError("Task 7 text request does not match the validated complete spec")
+    return json.loads(json.dumps(expected, ensure_ascii=False))

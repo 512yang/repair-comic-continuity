@@ -27,6 +27,7 @@ from pipeline_contracts import (
     normalize_relative_image_path,
     validate_bijection,
 )
+from prompt_compiler import validate_v4_text_repair_request
 
 
 SCHEMA_VERSION = "1.0"
@@ -57,11 +58,20 @@ REVIEW_MATRIX_CHECKS = (
     "full_resolution",
     "panel_topology",
     "composition",
-    "style",
     "identity",
+    "facial_hair",
+    "anatomy",
+    "costume",
+    "prop",
     "scene",
+    "style",
+    "text",
+    "sfx",
+    "artifact_damage",
+    "candidate_binding",
+    "preflight_binding",
 )
-TEXT_REVIEW_CHECKS = ("text_geometry", "no_new_balloon", "visual_glyphs")
+TEXT_REVIEW_CHECKS: tuple[str, ...] = ()
 _STABLE_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]{1,62}[a-z0-9])?\Z")
 DEFAULT_THRESHOLDS = {
     "min_grayscale_variance": 20.0,
@@ -95,6 +105,9 @@ _V4_REPORT_KEYS = _REPORT_KEYS | {
     "text_declaration",
     "redraw_evidence",
     "candidate_stage",
+    "text_spec",
+    "text_request",
+    "text_request_binding",
 }
 _REVIEW_KEYS = frozenset(
     {
@@ -211,7 +224,7 @@ def _normalize_text_declaration(value: object, original_hash: str, size: list[in
         value, "text_declaration", "declaration_hash"
     )
     source_page = _mapping(declaration.get("source_page"), "text_declaration.source_page")
-    normalize_relative_image_path(source_page.get("path"))
+    source_relative_path = normalize_relative_image_path(source_page.get("path"))
     if _sha256_value(
         source_page.get("sha256"), "text_declaration.source_page.sha256"
     ) != original_hash:
@@ -222,6 +235,17 @@ def _normalize_text_declaration(value: object, original_hash: str, size: list[in
         raise ValueError("text declaration must allow only declared blocks")
     if not isinstance(declaration.get("source_has_ordinary_text"), bool):
         raise ValueError("text declaration source_has_ordinary_text must be boolean")
+    canvas = _mapping(declaration.get("canvas_size"), "text_declaration.canvas_size")
+    if canvas.get("width") != size[0] or canvas.get("height") != size[1]:
+        raise ValueError("text declaration canvas does not match source dimensions")
+    current_target = _mapping(
+        declaration.get("current_target"), "text_declaration.current_target"
+    )
+    if (
+        current_target.get("path") != source_relative_path
+        or current_target.get("sha256") != original_hash
+    ):
+        raise ValueError("text declaration current_target does not match current source")
     inventory = _canonical_bound_mapping(
         declaration.get("source_text_inventory"),
         "text_declaration.source_text_inventory",
@@ -265,6 +289,33 @@ def _normalize_text_declaration(value: object, original_hash: str, size: list[in
     if declaration["source_has_ordinary_text"] is True and set(region_ids) != seen_regions:
         raise ValueError("text declaration must cover every source text region")
     return declaration
+
+
+def _validate_task7_binding(
+    text_spec: object,
+    text_request: object,
+    *,
+    original_hash: str,
+    size: list[int],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if not isinstance(text_spec, Mapping) or not isinstance(text_request, Mapping):
+        raise ValueError("complete Task 7 text_spec and text_request are required")
+    validated = validate_v4_text_repair_request(text_spec, text_request)
+    declaration = _normalize_text_declaration(
+        validated.get("declaration"), original_hash, size
+    )
+    normalized_spec = json.loads(json.dumps(text_spec, ensure_ascii=False))
+    binding = {
+        "contract_version": "v4",
+        "page_id": validated["page_id"],
+        "prompt_hash": validated["prompt_hash"],
+        "declaration_hash": validated["declaration_hash"],
+        "source_page_sha256": original_hash,
+        "source_relative_path": declaration["source_page"]["path"],
+        "candidate_dimensions": size,
+        "text_spec_sha256": canonical_hash(normalized_spec),
+    }
+    return normalized_spec, validated, binding
 
 
 def _normalize_change_mask(
@@ -331,7 +382,10 @@ def _outside_mask_check(
             original_image.load()
             with candidate_image.convert("RGBA") as candidate_rgba, original_image.convert("RGBA") as original_rgba:
                 difference_rgba = ImageChops.difference(candidate_rgba, original_rgba)
-                difference = difference_rgba.convert("L")
+                channels = difference_rgba.split()
+                difference = channels[0]
+                for channel in channels[1:]:
+                    difference = ImageChops.lighter(difference, channel)
                 changed = difference.point(lambda value: 255 if value else 0)
                 outside = ImageChops.multiply(changed, ImageChops.invert(mask))
                 expanded = mask.filter(ImageFilter.MaxFilter(3))
@@ -660,6 +714,8 @@ def _compute_preflight_body(
     text_declaration: object = None,
     redraw_evidence: object = None,
     candidate_stage: object = "final",
+    text_spec: object = None,
+    text_request: object = None,
 ) -> dict[str, Any]:
     """Compute a normalized report body without validation recursion."""
     candidate = _path(candidate_path, "candidate_path")
@@ -840,12 +896,15 @@ def _compute_preflight_body(
     normalized_declaration = None
     normalized_redraw = None
     normalized_stage = None
+    normalized_text_spec = None
+    normalized_text_request = None
+    text_request_binding = None
     if explicit_v4:
         normalized_stage = _text(candidate_stage, "candidate_stage")
         if normalized_stage not in {"textless", "final"}:
             raise ValueError("candidate_stage must be textless or final")
         if normalized_class == "unchanged":
-            if any(item is not None for item in (change_mask, text_declaration, redraw_evidence)):
+            if any(item is not None for item in (change_mask, text_declaration, redraw_evidence, text_spec, text_request)):
                 raise ValueError("unchanged candidate cannot carry repair evidence")
             same = candidate_hash == original_hash
             checks["content_preserved"] = _check(
@@ -859,9 +918,19 @@ def _compute_preflight_body(
         elif normalized_class == "text_only":
             if redraw_evidence is not None:
                 raise ValueError("text_only candidate cannot carry redraw evidence")
-            normalized_declaration = _normalize_text_declaration(
-                text_declaration, original_hash, size
+            if text_declaration is not None:
+                raise ValueError("self-signed text_declaration is forbidden; provide complete Task 7 request")
+            (
+                normalized_text_spec,
+                normalized_text_request,
+                text_request_binding,
+            ) = _validate_task7_binding(
+                text_spec,
+                text_request,
+                original_hash=original_hash,
+                size=size,
             )
+            normalized_declaration = normalized_text_request["declaration"]
             normalized_mask, opened_mask = _normalize_change_mask(
                 change_mask, size=size, declaration=normalized_declaration
             )
@@ -898,12 +967,26 @@ def _compute_preflight_body(
                 )
                 if normalized_stage == "textless" and text_declaration is not None:
                     raise ValueError("textless redraw stage cannot carry a text declaration")
+                if normalized_stage == "textless" and (text_spec is not None or text_request is not None):
+                    raise ValueError("textless redraw stage cannot carry Task 7 text inputs")
                 if normalized_stage == "final" and normalized_redraw["source_has_ordinary_text"]:
-                    normalized_declaration = _normalize_text_declaration(
-                        text_declaration, original_hash, size
+                    if text_declaration is not None:
+                        raise ValueError("self-signed text_declaration is forbidden; provide complete Task 7 request")
+                    (
+                        normalized_text_spec,
+                        normalized_text_request,
+                        text_request_binding,
+                    ) = _validate_task7_binding(
+                        text_spec,
+                        text_request,
+                        original_hash=original_hash,
+                        size=size,
                     )
+                    normalized_declaration = normalized_text_request["declaration"]
                 elif text_declaration is not None:
                     raise ValueError("no-text redraw cannot introduce a text declaration")
+                elif text_spec is not None or text_request is not None:
+                    raise ValueError("no-text redraw cannot carry Task 7 text inputs")
                 checks["redraw_evidence"] = _check(
                     "pass", normalized_redraw, {"complete": True}, "redraw evidence supplied"
                 )
@@ -921,6 +1004,9 @@ def _compute_preflight_body(
                 "text_declaration": normalized_declaration,
                 "redraw_evidence": normalized_redraw,
                 "candidate_stage": normalized_stage,
+                "text_spec": normalized_text_spec,
+                "text_request": normalized_text_request,
+                "text_request_binding": text_request_binding,
             }
         )
     provenance = {
@@ -951,6 +1037,9 @@ def _compute_preflight_body(
                 "text_declaration": normalized_declaration,
                 "redraw_evidence": normalized_redraw,
                 "candidate_stage": normalized_stage,
+                "text_spec": normalized_text_spec,
+                "text_request": normalized_text_request,
+                "text_request_binding": text_request_binding,
             }
         )
     return body
@@ -968,6 +1057,8 @@ def run_candidate_preflight(
     text_declaration: object = None,
     redraw_evidence: object = None,
     candidate_stage: object = "final",
+    text_spec: object = None,
+    text_request: object = None,
 ) -> dict[str, Any]:
     """Build a deterministic, fully bound machine-preflight report."""
     body = _compute_preflight_body(
@@ -982,6 +1073,8 @@ def run_candidate_preflight(
         text_declaration=text_declaration,
         redraw_evidence=redraw_evidence,
         candidate_stage=candidate_stage,
+        text_spec=text_spec,
+        text_request=text_request,
     )
     return {**body, "preflight_id": _report_id(body)}
 
@@ -1059,6 +1152,9 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
             "text_declaration",
             "redraw_evidence",
             "candidate_stage",
+            "text_spec",
+            "text_request",
+            "text_request_binding",
         }
     _exact_keys(evaluation_inputs, expected_evaluation_keys, "evaluation_inputs")
     normalized_evaluation = {
@@ -1075,6 +1171,9 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 "text_declaration": source["text_declaration"],
                 "redraw_evidence": source["redraw_evidence"],
                 "candidate_stage": source["candidate_stage"],
+                "text_spec": source["text_spec"],
+                "text_request": source["text_request"],
+                "text_request_binding": source["text_request_binding"],
             }
         )
     if normalized_evaluation["text_policy"] not in TEXT_POLICIES:
@@ -1126,9 +1225,11 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 thresholds=normalized_evaluation["thresholds"],
                 page_class=normalized_evaluation.get("page_class"),
                 change_mask=normalized_evaluation.get("change_mask"),
-                text_declaration=normalized_evaluation.get("text_declaration"),
+                text_declaration=None,
                 redraw_evidence=normalized_evaluation.get("redraw_evidence"),
                 candidate_stage=normalized_evaluation.get("candidate_stage", "final"),
+                text_spec=normalized_evaluation.get("text_spec"),
+                text_request=normalized_evaluation.get("text_request"),
             )
         except ValueError as exc:
             raise ValueError("preflight source files cannot be strongly validated") from exc
@@ -1190,6 +1291,8 @@ def _review_artifacts(
         raise ValueError("review artifact evidence is required")
     result: list[dict[str, Any]] = []
     seen_kinds: set[str] = set()
+    seen_paths: set[Path] = set()
+    source_size = list(report["expected_size"])
     for index, artifact in enumerate(value):
         row = _mapping(artifact, f"review artifact[{index}]")
         _exact_keys(
@@ -1200,6 +1303,7 @@ def _review_artifacts(
                     "sha256",
                     "kind",
                     "candidate_sha256",
+                    "source_sha256",
                     "preflight_id",
                     "created_at",
                 }
@@ -1207,6 +1311,9 @@ def _review_artifacts(
             f"review artifact[{index}]",
         )
         path = _path(row["path"], f"review artifact[{index}].path")
+        if path in seen_paths:
+            raise ValueError("review artifact paths must be unique")
+        seen_paths.add(path)
         digest = _sha256_value(row["sha256"], f"review artifact[{index}].sha256")
         if _sha256(path) != digest:
             raise ValueError("review artifact hash mismatch")
@@ -1221,36 +1328,49 @@ def _review_artifacts(
         if kind in seen_kinds:
             raise ValueError("review artifact kinds must be unique")
         seen_kinds.add(kind)
+        if row["source_sha256"] != report["hashes"]["original"]:
+            raise ValueError("review artifact source hash mismatch")
+        metrics = _verified_metrics(path, int(DEFAULT_THRESHOLDS["edge_pixel_threshold"]))
+        if metrics is None:
+            raise ValueError("review artifact must be a decodable image")
+        if kind == "full_resolution_original":
+            if digest != report["hashes"]["original"] or metrics["size"] != source_size:
+                raise ValueError("original review artifact must be exact full-size source image")
+        elif kind == "full_resolution_candidate":
+            if digest != report["hashes"]["candidate"] or metrics["size"] != source_size:
+                raise ValueError("candidate review artifact must be exact current full-size candidate")
+        elif kind == "full_resolution_comparison":
+            if metrics["size"][0] < source_size[0] * 2 or metrics["size"][1] < source_size[1]:
+                raise ValueError("comparison review artifact is not a full-size side-by-side image")
+        else:
+            raise ValueError("review artifact kind is invalid")
         result.append(
             {
                 "path": str(path),
                 "sha256": digest,
                 "kind": kind,
                 "candidate_sha256": row["candidate_sha256"],
+                "source_sha256": row["source_sha256"],
                 "preflight_id": row["preflight_id"],
                 "created_at": artifact_time,
             }
         )
-    required = (
-        {"full_resolution_original", "full_resolution_candidate", "full_resolution_comparison"}
-        if report["page_class"] == "full_page_redraw"
-        else {"full_resolution"}
-    )
+    required = {"full_resolution_original", "full_resolution_candidate", "full_resolution_comparison"}
     if not required.issubset(seen_kinds):
         raise ValueError(f"review artifact missing required full-resolution kinds: {sorted(required - seen_kinds)!r}")
     return result
 
 
-def _review_matrix(value: object, *, text_bearing: bool, accepted: bool) -> dict[str, str]:
+def _review_matrix(value: object, *, text_bearing: bool, accepted: bool) -> dict[str, bool]:
     source = _mapping(value, "check_matrix")
     expected = frozenset(REVIEW_MATRIX_CHECKS + (TEXT_REVIEW_CHECKS if text_bearing else ()))
     _exact_keys(source, expected, "check_matrix")
-    result: dict[str, str] = {}
+    result: dict[str, bool] = {}
     for name in sorted(expected):
-        status = _text(source[name], f"check_matrix.{name}")
-        if status not in {"passed", "failed", "needs_review"}:
-            raise ValueError("check_matrix status is invalid")
-        if accepted and status != "passed":
+        status = source[name]
+        if not isinstance(status, bool):
+            raise ValueError("check_matrix values must be booleans")
+        if accepted and status is not True:
             raise ValueError("accepted review cannot contain pending or failed checks")
         result[name] = status
     return result
@@ -1282,12 +1402,52 @@ def _glyph_review(
     reviewer_id = _stable_id(source["reviewer_id"], "glyph review reviewer_id")
     if reviewer_id == generator_id:
         raise ValueError("glyph review reviewer must be independent from generator")
-    artifact_rows = _review_artifacts(
-        [source["artifact"]],
-        report={**report, "page_class": "text_only"},
-        created_at=created_at,
-        reviewed_at=reviewed_at,
+    artifact = _mapping(source["artifact"], "glyph review artifact")
+    _exact_keys(
+        artifact,
+        frozenset(
+            {
+                "path",
+                "sha256",
+                "kind",
+                "source_sha256",
+                "candidate_sha256",
+                "preflight_id",
+                "created_at",
+            }
+        ),
+        "glyph review artifact",
     )
+    artifact_path = _path(artifact["path"], "glyph review artifact.path")
+    artifact_hash = _sha256_value(artifact["sha256"], "glyph review artifact.sha256")
+    if _sha256(artifact_path) != artifact_hash or artifact["kind"] != "full_resolution_glyph":
+        raise ValueError("glyph review artifact must be a hash-bound full-resolution image")
+    if (
+        artifact["source_sha256"] != report["hashes"]["original"]
+        or artifact["candidate_sha256"] != report["hashes"]["candidate"]
+        or artifact["preflight_id"] != report["preflight_id"]
+    ):
+        raise ValueError("glyph review artifact binding mismatch")
+    artifact_time = _timestamp(artifact["created_at"])
+    if not created_at < artifact_time <= reviewed_at:
+        raise ValueError("glyph review artifact time is invalid")
+    artifact_metrics = _verified_metrics(
+        artifact_path, int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+    )
+    if artifact_metrics is None or (
+        artifact_metrics["size"][0] < report["expected_size"][0]
+        or artifact_metrics["size"][1] < report["expected_size"][1]
+    ):
+        raise ValueError("glyph review artifact is not a decodable full-resolution image")
+    normalized_artifact = {
+        "path": str(artifact_path),
+        "sha256": artifact_hash,
+        "kind": "full_resolution_glyph",
+        "source_sha256": artifact["source_sha256"],
+        "candidate_sha256": artifact["candidate_sha256"],
+        "preflight_id": artifact["preflight_id"],
+        "created_at": artifact_time,
+    }
     if source["result"] != "passed":
         raise ValueError("glyph review result must be passed")
     rendered = source["rendered_blocks"]
@@ -1324,7 +1484,7 @@ def _glyph_review(
     if not {"\u5f3a", "\u9047"}.issubset(seen_chars):
         raise ValueError("glyph review regression vocabulary must include shape checks for 强 and 遇")
     return {
-        "artifact": artifact_rows[0],
+        "artifact": normalized_artifact,
         "reviewer_id": reviewer_id,
         "result": "passed",
         "rendered_blocks": normalized_blocks,

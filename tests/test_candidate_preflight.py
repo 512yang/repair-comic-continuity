@@ -15,6 +15,10 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from pipeline_contracts import canonical_hash  # noqa: E402
+from test_prompt_compiler import (  # noqa: E402
+    base_v4_text_spec,
+    refresh_text_inventory,
+)
 
 
 def candidate_preflight():
@@ -81,72 +85,340 @@ class CandidatePreflightTests(unittest.TestCase):
             **overrides,
         )
 
-    def make_text_candidate(self, *, outside_change=False):
-        original = self.root / "text-original.png"
-        candidate = self.root / "text-candidate.png"
-        mask = self.root / "text-mask.png"
-        base = Image.new("RGB", (64, 64), (235, 230, 215))
-        draw = ImageDraw.Draw(base)
-        draw.rectangle((4, 4, 59, 59), outline=(30, 30, 30), width=2)
-        draw.ellipse((20, 18, 44, 42), fill=(160, 120, 90))
+    def make_task7_text_candidate(self, *, outside_change=False, alpha_outside=False):
+        original = self.root / "task7-original.png"
+        candidate = self.root / "task7-candidate.png"
+        mask_path = self.root / "task7-mask.png"
+        base = Image.new("RGB", (256, 256), (235, 230, 215))
+        base_draw = ImageDraw.Draw(base)
+        base_draw.rectangle((4, 4, 251, 251), outline=(30, 30, 30), width=3)
+        base_draw.ellipse((70, 40, 190, 150), fill=(160, 120, 90))
+        if alpha_outside:
+            base = base.convert("RGBA")
         base.save(original)
         edited = base.copy()
-        edited_draw = ImageDraw.Draw(edited)
-        edited_draw.rectangle((8, 46, 30, 56), fill=(20, 20, 20))
+        ImageDraw.Draw(edited).rectangle((30, 170, 100, 195), fill=(90, 90, 90))
         if outside_change:
-            edited_draw.point((55, 8), fill=(255, 0, 0))
+            ImageDraw.Draw(edited).point((240, 20), fill=(255, 0, 0))
+        if alpha_outside:
+            red, green, blue, _ = edited.getpixel((240, 20))
+            edited.putpixel((240, 20), (red, green, blue, 0))
         edited.save(candidate)
         mask_image = Image.new("L", base.size, 0)
-        ImageDraw.Draw(mask_image).rectangle((7, 45, 31, 57), fill=255)
-        mask_image.save(mask)
-        inventory_body = {
-            "source_page_sha256": sha256(original),
-            "ordinary_text": True,
-            "regions": [
-                {
-                    "region_id": "region-1",
-                    "bbox": [7, 45, 32, 58],
-                    "source_balloon_exists": True,
-                }
-            ],
-        }
-        inventory = {
-            **inventory_body,
-            "inventory_sha256": canonical_hash(inventory_body),
-        }
-        declaration_body = {
-            "source_page": {
-                "path": "章节/0003.png",
-                "sha256": sha256(original),
-                "width": 64,
-                "height": 64,
-            },
-            "source_text_inventory": inventory,
-            "source_has_ordinary_text": True,
-            "blocks": [
-                {
-                    "block_id": "dialogue-1",
-                    "source_region_id": "region-1",
-                    "bbox": [7, 45, 32, 58],
-                }
-            ],
-            "only_declared_blocks": True,
-        }
-        declaration = {
-            **declaration_body,
-            "declaration_hash": canonical_hash(declaration_body),
-        }
-        return original, candidate, {
-            "path": str(mask),
-            "sha256": sha256(mask),
+        ImageDraw.Draw(mask_image).rectangle((20, 160, 219, 229), fill=255)
+        mask_image.save(mask_path)
+        change_mask = {
+            "path": str(mask_path),
+            "sha256": sha256(mask_path),
             "mode": "L",
-            "width": 64,
-            "height": 64,
-        }, declaration
+            "width": 256,
+            "height": 256,
+        }
+        spec = base_v4_text_spec()
+        page_path = "章节/0003.png"
+        source_hash = sha256(original)
+        spec["page_id"] = page_path
+        spec["canvas_size"] = {"width": 256, "height": 256}
+        spec["source_page"] = {
+            "path": page_path,
+            "sha256": source_hash,
+            "width": 256,
+            "height": 256,
+        }
+        spec["page_visual_metadata"].update(
+            page_path=page_path,
+            source_page_sha256=source_hash,
+        )
+        spec["cluster"].update(
+            member_pages=[page_path],
+            visual_targets=[page_path],
+            canary_page=page_path,
+        )
+        for reference in spec["references"]:
+            if reference["role"] == "target_composition":
+                reference.update(
+                    path=page_path,
+                    subject=page_path,
+                    sha256=source_hash,
+                )
+        region = spec["source_text_inventory"]["regions"][0]
+        region["bbox"] = [20, 160, 220, 230]
+        spec["source_text_inventory"].update(source_page_sha256=source_hash)
+        spec["source_text_inventory"]["coverage_review"].update(
+            source_page_sha256=source_hash,
+            inspected_bbox=[0, 0, 256, 256],
+        )
+        spec["blocks"][0].update(bbox=[20, 160, 220, 230])
+        spec["page_density_budget"].update(
+            max_page_chars_per_10000_px2=100,
+            max_block_chars_per_10000_px2=100,
+        )
+        refresh_text_inventory(spec)
+        request = importlib.import_module("prompt_compiler").compile_text_repair_request(spec)
+        return original, candidate, change_mask, spec, request
+
+    def review_artifact(self, path, report, kind, *, created_at="2026-07-14T19:30:00+00:00"):
+        return {
+            "path": str(path),
+            "sha256": sha256(path),
+            "kind": kind,
+            "candidate_sha256": report["hashes"]["candidate"],
+            "source_sha256": report["hashes"]["original"],
+            "preflight_id": report["preflight_id"],
+            "created_at": created_at,
+        }
+
+    def test_complete_task7_request_is_required_instead_of_self_signed_subset(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate()
+
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=mask,
+            text_spec=spec,
+            text_request=request,
+        )
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(
+            report["text_request_binding"]["declaration_hash"],
+            request["declaration_hash"],
+        )
+
+        comparison = self.root / "task7-comparison.png"
+        with Image.open(original) as left, Image.open(candidate) as right:
+            board = Image.new("RGB", (512, 256), "white")
+            board.paste(left.convert("RGB"), (0, 0))
+            board.paste(right.convert("RGB"), (256, 0))
+            board.save(comparison)
+        glyph_board = self.root / "task7-glyph.png"
+        Image.new("RGB", (256, 256), "white").save(glyph_board)
+        glyph_artifact = self.review_artifact(
+            glyph_board, report, "full_resolution_glyph"
+        )
+        review = module.record_independent_review(
+            report,
+            "text-worker-1",
+            "reviewer-2",
+            "accepted",
+            "2026-07-14T20:00:00+00:00",
+            candidate_created_at="2026-07-14T19:00:00+00:00",
+            review_artifacts=[
+                self.review_artifact(original, report, "full_resolution_original"),
+                self.review_artifact(candidate, report, "full_resolution_candidate"),
+                self.review_artifact(comparison, report, "full_resolution_comparison"),
+            ],
+            blind=True,
+            inspected_panels=["panel-1"],
+            inspected_entities=["hero"],
+            check_matrix={name: True for name in module.REVIEW_MATRIX_CHECKS},
+            glyph_review={
+                "artifact": glyph_artifact,
+                "reviewer_id": "glyph-reviewer-3",
+                "result": "passed",
+                "rendered_blocks": [{"block_id": "dialogue-1", "inspected": True}],
+                "regression_vocabulary": [
+                    {"character": "\u5f3a", "shape_inspected": True},
+                    {"character": "\u9047", "shape_inspected": True},
+                ],
+            },
+        )
+        self.assertTrue(module.candidate_is_finally_eligible(report, review))
+
+        forged = copy.deepcopy(request)
+        forged["declaration"]["current_target"]["sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "Task 7|current_target|request"):
+            module.run_candidate_preflight(
+                candidate,
+                original,
+                page_class="text_only",
+                text_policy="deterministic_text",
+                change_mask=mask,
+                text_spec=spec,
+                text_request=forged,
+            )
+
+    def test_review_artifact_kind_cannot_disguise_a_text_file(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(
+            self.candidate, self.original, page_class="unchanged"
+        )
+        fake = self.root / "board.txt"
+        fake.write_text("not an image", encoding="utf-8")
+        artifact = self.review_artifact(fake, report, "full_resolution")
+        matrix = {name: "passed" for name in module.REVIEW_MATRIX_CHECKS}
+
+        with self.assertRaisesRegex(ValueError, "image|artifact"):
+            module.record_independent_review(
+                report,
+                "worker-1",
+                "reviewer-2",
+                "accepted",
+                "2026-07-14T20:00:00+00:00",
+                candidate_created_at="2026-07-14T19:00:00+00:00",
+                review_artifacts=[artifact],
+                blind=True,
+                inspected_panels=["panel-1"],
+                inspected_entities=[],
+                check_matrix=matrix,
+            )
+
+    def test_rgba_alpha_change_outside_mask_is_not_lost_in_grayscale(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate(
+            alpha_outside=True
+        )
+
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=mask,
+            text_spec=spec,
+            text_request=request,
+        )
+        self.assertEqual(report["checks"]["outside_mask_preserved"]["status"], "fail")
+
+    def test_one_pixel_antialias_boundary_is_limited_and_two_pixels_outside_fails(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate()
+        with Image.open(candidate) as source:
+            boundary = source.convert("RGBA")
+        red, green, blue, _ = boundary.getpixel((220, 180))
+        boundary.putpixel((220, 180), (red, green, blue, 251))
+        boundary_path = self.root / "boundary.png"
+        boundary.save(boundary_path)
+        allowed = module.run_candidate_preflight(
+            boundary_path,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=mask,
+            text_spec=spec,
+            text_request=request,
+        )
+        self.assertEqual(allowed["checks"]["outside_mask_preserved"]["status"], "pass")
+
+        red, green, blue, _ = boundary.getpixel((221, 180))
+        boundary.putpixel((221, 180), (red, green, blue, 251))
+        outside_path = self.root / "two-pixels-outside.png"
+        boundary.save(outside_path)
+        rejected = module.run_candidate_preflight(
+            outside_path,
+            original,
+            page_class="text_only",
+            text_policy="deterministic_text",
+            change_mask=mask,
+            text_spec=spec,
+            text_request=request,
+        )
+        self.assertEqual(rejected["checks"]["outside_mask_preserved"]["status"], "fail")
+
+    def test_blind_review_matrix_rejects_old_incomplete_check_set(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(
+            self.candidate, self.original, page_class="unchanged"
+        )
+        comparison = self.root / "comparison.png"
+        Image.new("RGB", (1792, 1200), "white").save(comparison)
+        artifacts = [
+            self.review_artifact(self.original, report, "full_resolution_original"),
+            self.review_artifact(self.candidate, report, "full_resolution_candidate"),
+            self.review_artifact(comparison, report, "full_resolution_comparison"),
+        ]
+        old_matrix = {name: "passed" for name in module.REVIEW_MATRIX_CHECKS}
+
+        with self.assertRaisesRegex(ValueError, "check_matrix"):
+            module.record_independent_review(
+                report,
+                "worker-1",
+                "reviewer-2",
+                "accepted",
+                "2026-07-14T20:00:00+00:00",
+                candidate_created_at="2026-07-14T19:00:00+00:00",
+                review_artifacts=artifacts,
+                blind=True,
+                inspected_panels=["panel-1"],
+                inspected_entities=[],
+                check_matrix=old_matrix,
+            )
+
+    def test_full_page_redraw_accepts_only_real_full_size_three_board_review(self):
+        module = candidate_preflight()
+        original, candidate, _, _, _ = self.make_task7_text_candidate()
+        topology = self.root / "panel-topology.png"
+        Image.new("RGB", (256, 256), "white").save(topology)
+        request_path = self.root / "textless-request.json"
+        request_path.write_text(
+            '{"source_page_sha256":"%s","target_composition_sha256":"%s","textless":true}'
+            % (sha256(original), sha256(original)),
+            encoding="utf-8",
+        )
+        redraw_evidence = {
+            "source_page_sha256": sha256(original),
+            "candidate_sha256": sha256(candidate),
+            "candidate_stage": "textless",
+            "source_has_ordinary_text": False,
+            "panel_topology": {
+                "path": str(topology),
+                "sha256": sha256(topology),
+                "kind": "panel_topology",
+                "source_page_sha256": sha256(original),
+                "candidate_sha256": sha256(candidate),
+            },
+            "target_composition": {
+                "path": str(original),
+                "sha256": sha256(original),
+                "kind": "target_composition",
+                "source_page_sha256": sha256(original),
+            },
+            "textless_request": {
+                "path": str(request_path),
+                "sha256": sha256(request_path),
+                "kind": "textless_redraw_request",
+                "source_page_sha256": sha256(original),
+            },
+        }
+        report = module.run_candidate_preflight(
+            candidate,
+            original,
+            page_class="full_page_redraw",
+            candidate_stage="textless",
+            text_policy="textless",
+            ocr_metadata=VALID_OCR,
+            redraw_evidence=redraw_evidence,
+        )
+        comparison = self.root / "redraw-comparison.png"
+        with Image.open(original) as left, Image.open(candidate) as right:
+            board = Image.new("RGB", (512, 256), "white")
+            board.paste(left.convert("RGB"), (0, 0))
+            board.paste(right.convert("RGB"), (256, 0))
+            board.save(comparison)
+        review = module.record_independent_review(
+            report,
+            "redraw-worker-1",
+            "reviewer-2",
+            "accepted",
+            "2026-07-14T20:00:00+00:00",
+            candidate_created_at="2026-07-14T19:00:00+00:00",
+            review_artifacts=[
+                self.review_artifact(original, report, "full_resolution_original"),
+                self.review_artifact(candidate, report, "full_resolution_candidate"),
+                self.review_artifact(comparison, report, "full_resolution_comparison"),
+            ],
+            blind=True,
+            inspected_panels=["panel-1"],
+            inspected_entities=["hero"],
+            check_matrix={name: True for name in module.REVIEW_MATRIX_CHECKS},
+        )
+        self.assertTrue(module.candidate_is_finally_eligible(report, review))
 
     def test_text_only_candidate_rejects_pixels_changed_outside_mask(self):
         module = candidate_preflight()
-        original, candidate, change_mask, declaration = self.make_text_candidate(
+        original, candidate, change_mask, spec, request = self.make_task7_text_candidate(
             outside_change=True
         )
 
@@ -156,7 +428,8 @@ class CandidatePreflightTests(unittest.TestCase):
             page_class="text_only",
             text_policy="deterministic_text",
             change_mask=change_mask,
-            text_declaration=declaration,
+            text_spec=spec,
+            text_request=request,
         )
 
         self.assertEqual(
@@ -185,17 +458,18 @@ class CandidatePreflightTests(unittest.TestCase):
 
     def test_text_candidate_requires_visual_glyph_review(self):
         module = candidate_preflight()
-        original, candidate, change_mask, declaration = self.make_text_candidate()
+        original, candidate, change_mask, spec, request = self.make_task7_text_candidate()
         report = module.run_candidate_preflight(
             candidate,
             original,
             page_class="text_only",
             text_policy="deterministic_text",
             change_mask=change_mask,
-            text_declaration=declaration,
+            text_spec=spec,
+            text_request=request,
         )
         board = self.root / "glyph-board.png"
-        Image.new("RGB", (64, 64), "white").save(board)
+        Image.new("RGB", (256, 256), "white").save(board)
 
         with self.assertRaisesRegex(ValueError, "glyph review"):
             module.record_independent_review(

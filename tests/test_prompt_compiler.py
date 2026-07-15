@@ -1280,6 +1280,20 @@ class V4FullPageRedrawCompilerTests(unittest.TestCase):
 
 
 class V4TextGeometryCompilerTests(unittest.TestCase):
+    def test_public_validator_recomputes_complete_v4_request_and_rejects_tamper(self):
+        module = prompt_compiler()
+        spec = base_v4_text_spec()
+        request = module.compile_text_repair_request(spec)
+
+        self.assertEqual(
+            request,
+            module.validate_v4_text_repair_request(spec, request),
+        )
+        forged = copy.deepcopy(request)
+        forged["declaration"]["blocks"][0]["source_balloon_exists"] = False
+        with self.assertRaisesRegex(ValueError, "Task 7|request"):
+            module.validate_v4_text_repair_request(spec, forged)
+
     def test_page_reset_request_contains_exact_declaration_hash_and_geometry(self):
         module = prompt_compiler()
         source = base_v4_text_spec()
