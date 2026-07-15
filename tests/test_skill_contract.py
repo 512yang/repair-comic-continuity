@@ -13,211 +13,50 @@ def read(relative_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-class SceneClusterSkillContractTests(unittest.TestCase):
-    def test_public_skill_docs_are_utf8_without_replacement_or_typical_mojibake(self):
-        documents = {
-            "SKILL.md": read("SKILL.md"),
-            **{
-                path.name: path.read_text(encoding="utf-8")
-                for path in sorted((SKILL_ROOT / "references").glob("*.md"))
-            },
+class ContinuityV4SkillContractTests(unittest.TestCase):
+    def test_required_v4_phrases_are_public(self):
+        required_phrases = {
+            "SKILL.md": [
+                "continuity_v4",
+                "same relative path, filename, and extension",
+                "continuity_first_full_page",
+                "contact sheets are orientation aids only",
+                "generator cannot approve its own candidate",
+                "validation is read-only",
+            ],
+            "references/continuity-rules.md": [
+                "beard",
+                "moustache",
+                "sideburn",
+                "Non-critical action variation is not a defect",
+                "entity_state_timeline.json",
+            ],
+            "references/qa-checklist.md": [
+                "full-resolution artifact",
+                "blind review",
+                "exact relative-path set",
+                "malformed glyph",
+            ],
         }
-        mojibake = re.compile(r"\ufffd|â|Ã|鈥")
-        for name, document in documents.items():
-            with self.subTest(document=name):
+        for filename, phrases in required_phrases.items():
+            document = read(filename)
+            for phrase in phrases:
+                with self.subTest(filename=filename, phrase=phrase):
+                    self.assertIn(phrase, document)
+
+    def test_public_text_is_utf8_without_replacement_or_known_mojibake(self):
+        paths = [SKILL_ROOT / "SKILL.md"]
+        paths.extend(sorted((SKILL_ROOT / "references").glob("*.md")))
+        paths.extend(sorted((SKILL_ROOT / "agents").glob("*.yaml")))
+        mojibake = re.compile(r"\ufffd|锛|鈥|卤|杈|婕|鏂囧瓧|鍙傝€")
+        for path in paths:
+            document = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(SKILL_ROOT).as_posix()):
                 self.assertIsNone(mojibake.search(document))
 
-    def test_skill_names_codex_coordinator_as_orchestrator_without_monolithic_cli(self):
+    def test_skill_is_concise_and_frontmatter_is_supported(self):
         skill = read("SKILL.md")
-        self.assertIn("Codex coordinator is the orchestrator", skill)
-        self.assertIn(
-            "library APIs are intentionally composed by the coordinator; "
-            "there is no monolithic image-generation CLI",
-            skill,
-        )
-
-    def test_migration_apply_requires_confirmed_alignment_and_independent_review(self):
-        migration_docs = "\n".join(
-            (read("SKILL.md"), read("references/scene-cluster-pipeline.md"))
-        )
-        self.assertIn("migration is dry-run only by default", migration_docs)
-        self.assertIn("every novel alignment is `confirmed`", migration_docs)
-        self.assertIn("independent accepted migration review", migration_docs)
-
-    def test_page_class_action_mapping_and_undersized_block_are_documented(self):
-        documents = "\n".join(
-            (
-                read("SKILL.md"),
-                read("references/scene-cluster-pipeline.md"),
-                read("references/qa-checklist.md"),
-            )
-        )
-        self.assertIn(
-            "`page_class=full_page_redraw` maps to `action=full_page_regeneration`",
-            documents,
-        )
-        self.assertIn("undersized: true", documents)
-        self.assertIn("must remain blocked", documents)
-        self.assertIn("boundary_exception=true", documents)
-        self.assertIn("project_total_below_min", documents)
-        self.assertIn("evidence_resolution", documents)
-
-    def test_skill_routes_to_both_new_references_and_uses_dynamic_page_count(self):
-        skill = read("SKILL.md")
-        self.assertIn("references/scene-cluster-pipeline.md", skill)
-        self.assertIn("references/failure-learning.md", skill)
-        self.assertIn("scene_cluster_v1", skill)
-        self.assertRegex(skill, r"动态页数|dynamic page count|输入页数 `?N`?")
-        self.assertNotIn("Expect 98 pages unless", skill)
-        self.assertNotIn("Name the 98 final images", skill)
-
-    def test_skill_defines_four_page_classes_and_exact_n_output(self):
-        skill = read("SKILL.md")
-        for page_class in (
-            "unchanged",
-            "text_only",
-            "full_page_regeneration",
-            "evidence_blocked",
-        ):
-            self.assertIn(page_class, skill)
-        self.assertRegex(skill, r"输入.*N.*输出.*N|exactly `?N`?.*output")
-
-    def test_skill_states_parallel_safety_and_quality_gates(self):
-        skill = read("SKILL.md")
-        required_terms = (
-            "coordinator",
-            "3 workers",
-            "lease",
-            "candidate",
-            "single-writer",
-            "content cache",
-            "circuit breaker",
-            "canary",
-            "structured prompt",
-            "preflight",
-            "generated_by != reviewed_by",
-        )
-        for term in required_terms:
-            with self.subTest(term=term):
-                self.assertIn(term, skill)
-
-    def test_scene_pipeline_reference_covers_cluster_queue_and_promotion_contracts(self):
-        reference = read("references/scene-cluster-pipeline.md")
-        for term in (
-            "8–20",
-            "±2",
-            "reference role",
-            "canary",
-            "queued",
-            "leased",
-            "completed",
-            "failed",
-            "atomic",
-            "speaker graph",
-            "page_density_budget",
-            "preflight",
-            "independent review",
-            "single-writer",
-            "bijection",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, reference)
-
-    def test_failure_learning_reference_covers_taxonomy_promotion_and_rollback(self):
-        reference = read("references/failure-learning.md")
-        for code in (
-            "style_drift",
-            "identity_drift",
-            "costume_prop_drift",
-            "composition_drift",
-            "anatomy_error",
-            "scene_drift",
-            "text_leak",
-            "over_rendering",
-        ):
-            with self.subTest(code=code):
-                self.assertIn(code, reference)
-        for term in (
-            "before",
-            "after",
-            "outcome",
-            "page → cluster → project → skill_candidate",
-            "two clusters",
-            "revoke",
-            "circuit breaker",
-            "regression",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, reference)
-
-    def test_continuity_reference_defines_state_machines_and_speaker_graph(self):
-        reference = read("references/continuity-rules.md")
-        for term in (
-            "present",
-            "absent",
-            "unknown",
-            "speaker graph",
-            "art text",
-            "extra",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, reference)
-
-    def test_qa_reference_checks_scene_pipeline_completion(self):
-        checklist = read("references/qa-checklist.md")
-        for term in (
-            "canary",
-            "reference contamination",
-            "lease",
-            "generated_by != reviewed_by",
-            "failure_rule_ids",
-            "speaker graph",
-            "page_density_budget",
-            "exactly N",
-            "zero unresolved tasks",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, checklist)
-
-    def test_v3_evidence_registry_and_identity_bindings_are_documented(self):
-        skill = read("SKILL.md")
-        reference = read("references/scene-cluster-pipeline.md")
-        self.assertIn("schema_version: 3.0", skill)
-        for filename in (
-            "scene_clusters.json",
-            "style_reference_packs.json",
-            "task_queue.json",
-            "failure_learning.json",
-            "scene_cluster_qa.json",
-        ):
-            with self.subTest(filename=filename):
-                self.assertIn(filename, skill)
-                self.assertIn(filename, reference)
-        for term in (
-            "registry_hash",
-            "stable_pages",
-            "approved_hashes",
-            "completed_by == generated_by",
-            "reviewed_by == page_qa.reviewer",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, reference)
-
-    def test_text_source_binding_and_mode_split_are_documented(self):
-        skill = read("SKILL.md")
-        for term in (
-            "source_novel_text",
-            "raw UTF-8 SHA-256",
-            "exact source slice",
-            "must not enter the compiled prompt",
-            "block_replace",
-            "page_reset",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, skill)
-
-    def test_skill_has_only_supported_frontmatter_fields(self):
-        skill = read("SKILL.md")
+        self.assertLess(len(skill.splitlines()), 500)
         match = re.match(r"\A---\n(?P<frontmatter>.*?)\n---\n", skill, re.DOTALL)
         self.assertIsNotNone(match)
         keys = {
@@ -226,6 +65,49 @@ class SceneClusterSkillContractTests(unittest.TestCase):
             if ":" in line
         }
         self.assertEqual({"name", "description"}, keys)
+
+    def test_exact_names_replace_legacy_sequential_renaming(self):
+        skill = read("SKILL.md")
+        self.assertIn("identical relative path and extension", skill)
+        self.assertNotIn("0001.jpg", skill)
+        self.assertNotIn("scene_cluster_v1", skill)
+        self.assertNotIn("schema_version: 3.0", skill)
+
+    def test_four_classes_and_textless_redraw_order_are_explicit(self):
+        skill = read("SKILL.md")
+        for page_class in ("unchanged", "text_only", "full_page_redraw", "evidence_blocked"):
+            self.assertIn(page_class, skill)
+        self.assertLess(skill.index("full-page textless candidate"), skill.index("Restore text only after"))
+        self.assertIn("remove all ordinary text", skill)
+        self.assertIn("deterministic rendering", skill)
+
+    def test_parallel_cost_controls_and_review_independence_are_explicit(self):
+        documents = "\n".join(
+            (read("SKILL.md"), read("references/scene-cluster-pipeline.md"), read("references/failure-learning.md"))
+        )
+        for phrase in (
+            "at most 3 workers",
+            "canary",
+            "second failure",
+            "pause that lane",
+            "clean-control",
+            "independent-review",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
+    def test_audit_only_and_final_validation_never_generate_or_rebuild(self):
+        skill = read("SKILL.md")
+        self.assertIn("scripts/validate_audit.py", skill)
+        self.assertIn("rejects candidate images", skill)
+        self.assertIn("must not rebuild evidence", skill)
+        self.assertIn("V3 migration output is diagnostic only", skill)
+
+    def test_ui_metadata_describes_v4_without_shortcut(self):
+        metadata = read("agents/openai.yaml")
+        self.assertIn("漫画连续性修复 V4", metadata)
+        self.assertIn("continuity_v4", metadata)
+        self.assertIn("先审核再修复", metadata)
 
 
 if __name__ == "__main__":

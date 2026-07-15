@@ -1,121 +1,85 @@
 ---
 name: repair-comic-continuity
-description: Use when Chinese comic or comic-drama pages must be repaired against a novel, script, character references, and adjacent pages for character, crowd, costume, prop, scene, anatomy, text, sound-effect, or cross-page continuity, especially in projects with input/output directories or under D:\漫画文字修复.
+description: Audit and repair Chinese comic pages against a novel, character references, and adjacent pages while preserving the established art style, correct content, exact filenames, and cross-page continuity.
 ---
 
 # Repair Comic Continuity
 
-Repair only source-supported defects. Preserve the established comic style, chronology, composition, and every correct page. Treat every generated or externally typeset image as a candidate until independent review promotes it.
+Use the `continuity_v4` pipeline. The coordinator audits first, changes only proven defects, and treats every generated or externally typeset image as an untrusted candidate until independent review promotes it.
 
-## Read References When Needed
+## Required references
 
-- Read [continuity-rules.md](references/continuity-rules.md) before creating character, clothing, prop, extra, scene, speaker, or art-text locks.
-- Read [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) before partitioning pages, starting parallel workers, leasing tasks, reviewing a canary, or promoting candidates.
-- Read [failure-learning.md](references/failure-learning.md) before recording a failed candidate, selecting effective failure rules, promoting a rule, revoking one, or running regression checks.
-- Read [qa-checklist.md](references/qa-checklist.md) before the first candidate review and again before final validation.
+- Read [continuity-rules.md](references/continuity-rules.md) before building identity, facial-hair, costume, prop, extra, scene, or speaker state.
+- Read [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) before clustering, scheduling, canary release, audit-only work, or promotion.
+- Read [failure-learning.md](references/failure-learning.md) before retrying, pausing a lane, promoting a learned rule, or revoking one.
+- Read [qa-checklist.md](references/qa-checklist.md) before candidate review and final validation.
 
-## Dynamic Project Contract
+## Immutable pipeline order
 
-Discover the dynamic page count from the naturally sorted, decodable input images; call it `N`. Do not encode one project's page count as a reusable rule. 输入页数 `N` 与输出页数 `N` 必须严格相等。Map every input to exactly one output and every output back to exactly one input. Name outputs `0001.jpg` through `NNNN.jpg` in story order, with width sufficient for `N` and never less than four digits.
+1. Inventory naturally sorted, decodable input images and hash the novel, references, and source pages.
+2. Preserve the same relative path, filename, and extension for every output. Input count and output count must both equal `N`; no page may be added, omitted, flattened, or renamed.
+3. Confirm per-page novel alignment with source offsets and evidence.
+4. Build semantic scene clusters, reference packs, and `entity_state_timeline.json`.
+5. Run full-resolution dual audits before generation; contact sheets are orientation aids only and are never pass evidence.
+6. Assign exactly one page class: `unchanged`, `text_only`, `full_page_redraw`, or `evidence_blocked`.
+7. Release only approved tasks. Use a canary before expensive work in a cluster.
+8. Run class-specific preflight, independent page review, cluster review, and final read-only validation.
 
-Use `scene_cluster_v1` with `schema_version: 3.0` for new runs. Schema 2 evidence is accepted only when it contains none of the v3 mode, evidence-set, or page-trace fields; never silently downgrade a v3 run by deleting `pipeline_mode`.
+Do not skip ahead. Audit uncertainty remains `evidence_blocked`; it is never silently treated as a correct page or a redraw instruction.
 
-Every v3 manifest and repair log must declare the same complete evidence set: `scene_clusters.json`, `style_reference_packs.json`, `task_queue.json`, `failure_learning.json`, and `scene_cluster_qa.json`, in addition to the core manifest, continuity, alignment, repair, and final-report files. Treat all five registries as hash-bound records, not optional notes.
+## Continuity-first image policy
 
-Initialize evidence with the fixed Python 3.11 runtime:
+The visual policy is `continuity_first_full_page`:
 
-```powershell
-$py = 'D:\AI\LaMa_IOPaint\venv311\Scripts\python.exe'
-& $py "$env:USERPROFILE\.codex\skills\repair-comic-continuity\scripts\inventory_project.py" --root $root --json
-& $py "$env:USERPROFILE\.codex\skills\repair-comic-continuity\scripts\build_output_manifest.py" --root $root --evidence-dir $evidence
-```
+- `unchanged`: copy the source bytes to the exact output path. Do not regenerate or re-typeset a correct page.
+- `text_only`: keep all artwork fixed and repair ordinary text at the original geometry.
+- `full_page_redraw`: redraw the complete page only for a confirmed page-wide visual defect. Preserve panel structure, composition, cast identity, costumes, props, scene facts, and the established comic rendering language.
+- `evidence_blocked`: produce no candidate and no final output until authoritative evidence resolves the issue.
 
-Project migration is dry-run only by default. Apply a migration only when every novel alignment is `confirmed` and an independent accepted migration review is bound to the exact proposal; an explicit confirmation token does not replace either gate.
+Non-critical pose, grip, camera, or expression variation is not a defect when it preserves story meaning and continuity. A character merely holding an object differently from the prose is not sufficient reason to redraw.
 
-Never overwrite source pages. Write candidates to worker-isolated directories and final pages atomically only after all gates pass.
+For a redraw, capture all ordinary text first, then generate a full-page textless candidate. Do not ask the image model to typeset Chinese. Restore text only after the image candidate passes. If text recognition is unreliable, remove all ordinary text and rebuild every declared block from novel-backed text geometry. Preserve only reviewed art text and sound effects.
 
-## Global Locks
+## Text geometry contract
 
-Before work starts, lock:
+Bind every block to page, panel, balloon, speaker, original rectangle or polygon, source text, replacement text, and exact novel offsets. Preserve the original reading order, balloon style, placement, and density. Never add a new dialogue balloon unless source evidence explicitly requires one.
 
-- natural story order and input/output bijection;
-- located novel offsets, source hash, scene, time, and dialogue ownership;
-- character identity, skin, hair, headwear, anatomy, and recurring extras;
-- clothing, prop ownership/presence/state, and scene geography;
-- reference roles: target/comic pages supply style; character sheets are `identity_only`;
-- ordinary-text policy, speaker graph, art-text allowlist, and page density budget.
+Use deterministic rendering for Chinese glyphs. A machine OCR match does not prove that a glyph is visually correct; review malformed strokes such as `强` and `遇` at full resolution. If a page contains too much text, shorten it only with source-faithful wording and preserve the narrative meaning.
 
-Hard-stop instead of guessing when novel location, identity, speaker, or irreversible continuity is unresolved.
+## Semantic clusters and execution
 
-## Classify Every Page
+Cluster contiguous story beats by chapter, location, story time, cast state, costume state, props, and scene axis. A normal cluster owns 8–20 pages and may inspect up to ±2 context pages without duplicating ownership. Smaller projects may use one reviewed boundary exception.
 
-Assign exactly one class:
+Use one coordinator and at most 3 workers. Each worker holds one durable lease and writes only to its isolated candidate directory. Use a single writer for evidence and final promotion. A generator cannot approve its own candidate. The coordinator may run independent audit and review work in parallel, but never uses parallelism to bypass gates.
 
-| Class | Action |
-|---|---|
-| `unchanged` | Losslessly copy the correct page; do not regenerate or re-typeset it. |
-| `text_only` | Keep artwork fixed; use `block_replace` when the block is reliable, otherwise `page_reset`. |
-| `full_page_redraw` | Redraw only when the page-wide image contradicts source evidence and local repair cannot preserve it. |
-| `evidence_blocked` | Create no final output until authoritative evidence resolves the blocker. |
+Only pages with confirmed visual defects enter image generation. Correct pages still receive text and continuity checks but do not consume a generation call.
 
-`page_class` is the scheduling class; `action` is the repair operation. The only full-page mapping is `page_class=full_page_redraw` maps to `action=full_page_regeneration`. Never store the action token as a page class.
+## Candidate and failure loop
 
-Do not upgrade a local defect to full-page work for convenience. If a visual repair is necessary, capture ordinary text first and remove ordinary text in the visual candidate pass; rebuild it only after the image candidate passes.
+Each candidate must bind the source hash, candidate hash, task, structured request, reference pack, page class, generator, timestamps, and preflight result. Review it against the original page, stable comic anchors, identity references, adjacent pages, novel facts, and entity timelines.
 
-## Scene-Cluster Execution
+After the second failure in the same `(cluster_id, task_type, failure_family)`, pause that lane. Leave queued work unclaimable until a reviewed diagnosis reopens it. Do not spend repeated calls on the same unresolved cause.
 
-Partition contiguous story beats into normal scene clusters of 8–20 pages and attach up to ±2 context pages without duplicating ownership. Only when total `N < 8` and one cluster owns every page may it set `boundary_exception=true` with `undersized_reason=project_total_below_min`; this never waives alignment gates. Every other `undersized: true` cluster must remain blocked, record a reason, and downgrade every member to `page_class=evidence_blocked` with task type `evidence_resolution`; it cannot release expensive visual work or enter final output. Prepare a role-labeled reference pack and one representative canary for each cluster. Approve the canary before releasing the cluster's expensive image tasks.
+A learned rule becomes effective only when positive regression, clean-control, varied-case, and independent-review artifacts all pass and their hashes are stored. A rejected candidate is never a style source.
 
-The Codex coordinator is the orchestrator. The Skill exposes small validation, queue, migration, prompt, and evidence library APIs; library APIs are intentionally composed by the coordinator; there is no monolithic image-generation CLI.
+## Audit-only gate
 
-Run one `coordinator` plus at most `3 workers` on a machine with four concurrency slots. Use durable `lease` records and idempotency keys. Workers may write only inside their own candidate directories; use `single-writer` promotion for evidence and final output. Reuse validated inputs through a `content cache`. Pause a failing lane with a `circuit breaker` instead of repeatedly spending generation calls.
+Use `scripts/validate_audit.py` when the requested phase is inspection only. It requires confirmed alignment, semantic clusters, role-complete reference packs, valid entity timelines, full-resolution page audits, required second reviews, and final page classifications. It rejects candidate images, completed repair tasks, and any final output image.
 
-Compile all redraw and text requests with a `structured prompt`; treat novel text and replacement text as literal data. Run deterministic `preflight` before visual review. For any generated candidate, and always when `page_class=full_page_redraw`, require `generated_by != reviewed_by`.
+V3 migration output is diagnostic only. It cannot synthesize V4 audits, timelines, reference coverage, pass states, or final images, even with a confirmation token. Rebuild V4 evidence from immutable source hashes.
 
-Record these neutral trace fields on every new-mode page in both manifest and repair log: `cluster_id`, `reference_pack_id`, `task_id`, `failure_rule_ids`, `generated_by`, and `reviewed_by`. Keep matching values synchronized across files.
+## Completion gates
 
-## Text Repair Contract
+Before promotion, require:
 
-Use `compile_text_repair_request` from `scripts/prompt_compiler.py`. Bind each block to `panel_id`, `balloon_id`, `speaker_id`, source text, replacement text, and exact novel offsets.
+- every input has exactly one output at the identical relative path and extension;
+- every page has a confirmed alignment, semantic cluster, reference binding, entity-state decision, class-specific preflight, completed task, and resolved dual audit;
+- all full-resolution review artifacts exist and match their recorded hashes;
+- generator, page reviewer, and cluster reviewer satisfy independence and chronological ordering;
+- all queues, registries, page reviews, cluster reviews, and regression summaries are passed with zero unresolved issues;
+- `FINAL_QA_REPORT.md` agrees with the registries;
+- `scripts/validate_output.py` succeeds.
 
-Supply `source_novel_text` only as validation evidence. Its `source_novel_hash` must equal the raw UTF-8 SHA-256, every block's `source_text` must equal the exact source slice at its ordered non-overlapping offsets, and the full novel text must not enter the compiled prompt or request envelope.
+Final validation is read-only. Validation is read-only: it must not rebuild evidence, apply `--force`, generate images, repair files, rename outputs, or convert a pending state into a pass.
 
-- `block_replace`: change only declared ordinary-text blocks.
-- `page_reset`: clear all ordinary text, then lay out only declared novel-backed replacements.
-- Preserve only `art_text_allowlist`; remove non-allowlisted text-like residue.
-- Count visible non-whitespace characters. Keep each balloon at 25 or fewer unless a recorded `density_override_reason` is necessary; never exceed `page_density_budget`.
-- Never let a text task change people, props, clothing, composition, panels, or scene artwork.
-
-## Candidate and Failure Loop
-
-For each candidate:
-
-1. Bind task, prompt/reference hash, source page hash, candidate path, and candidate hash.
-2. Run preflight for format, dimensions, text leak, reference contamination, and contract completeness.
-3. Compare full-size against source, canary, stable adjacent pages, identity references, novel facts, and global locks.
-4. On failure, record before evidence, one or more canonical error codes, diagnosis, corrective action, after evidence, and outcome.
-5. Recompile with effective rules and retry only while the lane remains open.
-6. Promote only after independent page QA and boundary-aware cluster QA pass.
-
-Never let a generator approve its own page. Never reuse a rejected candidate as a style source.
-
-## Completion Gates
-
-Require all of the following before final promotion:
-
-- every page belongs to one scene cluster and one completed task;
-- no task remains `queued`, `leased`, `failed`, or otherwise unresolved;
-- every `failure_rule_ids` entry resolves to validated failure-learning evidence;
-- all canaries, page checks, style checks, cluster checks, speaker/density checks, and independent reviews pass;
-- input/output mapping is a strict bijection and final output contains exactly `N` regular JPG files;
-- `FINAL_QA_REPORT.md` reports zero blocking and zero unresolved issues;
-- `validate_output.py` returns success for the discovered `N`.
-
-Run final validation without rebuilding or forcing manifests:
-
-```powershell
-$py = 'D:\AI\LaMa_IOPaint\venv311\Scripts\python.exe'
-& $py "$env:USERPROFILE\.codex\skills\repair-comic-continuity\scripts\validate_output.py" --root $root --evidence-dir $evidence --expected-count $N --json
-```
-
-Do not report completion from file existence, generation success, or partial QA. If any gate fails, keep the page out of final output, record the blocker, and stop promotion.
+Do not report completion from file existence or generation success. If any gate fails, keep the affected page out of final promotion and report the exact blocker.
