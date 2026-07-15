@@ -21,7 +21,7 @@ Use the `continuity_v5_unified` pipeline. It retains the hash-bound `continuity_
 2. Preserve the same relative path, filename, and extension for every output. Input count and output count must both equal `N`; no page may be added, omitted, flattened, or renamed.
 3. Confirm per-page novel alignment with source offsets and evidence.
 4. Build semantic scene clusters, reference packs, and `entity_state_timeline.json`.
-5. Run full-resolution dual audits before generation; contact sheets are orientation aids only and are never pass evidence.
+5. Build and validate `character_appearance_matrix.json`, then run full-resolution dual audits. The matrix must bind every cluster page and every named character to an identity reference and compare skin tone, hair, facial hair, and clothing across the complete cluster; contact sheets are orientation aids only and are never pass evidence.
 6. Build a complete text-region inventory and hash-bound original `style_lock` for every ordinary-text block. Missing or low-confidence evidence is `evidence_blocked`.
 7. Assign exactly one page class: `unchanged`, `text_only`, `full_page_redraw`, or `evidence_blocked`.
 8. Release only approved tasks. Use a canary before expensive work in a cluster.
@@ -60,6 +60,8 @@ Use one coordinator and at most 3 workers. Each worker holds one durable lease a
 
 Only pages with confirmed visual defects enter image generation. Correct pages still receive text and continuity checks but do not consume a generation call.
 
+Run `python scripts/validate_appearance_matrix.py evidence/character_appearance_matrix.json` before classifying any page. A missing character page, missing identity reference, non-full-resolution observation, `not_visible` trait on a visible character, or unexplained trait drift blocks confirmation. Do not excuse a same-scene skin-tone category change as lighting without explicit full-resolution evidence. Reject generated candidates that reintroduce a drift already recorded in the matrix.
+
 ## Candidate and failure loop
 
 Each candidate must bind the source hash, candidate hash, task, structured request, reference pack, page class, generator, timestamps, and preflight result. Review it against the original page, stable comic anchors, identity references, adjacent pages, novel facts, and entity timelines.
@@ -80,6 +82,7 @@ Before promotion, require:
 
 - every input has exactly one output at the identical relative path and extension;
 - every page has a confirmed alignment, semantic cluster, reference binding, entity-state decision, class-specific preflight, completed task, and resolved dual audit;
+- every scene cluster has a confirmed `character_appearance_matrix.json` with exact page coverage and no unresolved skin, hair, facial-hair, or clothing drift;
 - all full-resolution review artifacts exist and match their recorded hashes;
 - generator, page reviewer, and cluster reviewer satisfy independence and chronological ordering;
 - all queues, registries, page reviews, cluster reviews, and regression summaries are passed with zero unresolved issues;

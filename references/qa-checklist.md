@@ -4,6 +4,7 @@
 
 - Confirm the novel hash, offsets, scene summary, cast, dialogue owners, props, location, and time for every page.
 - Confirm semantic cluster membership, complete reference roles, stable comic anchors, and entity timeline transitions.
+- Validate `character_appearance_matrix.json`; require exact cluster-page coverage and full-resolution, reference-bound checks for skin tone, hair, facial hair, and clothing for every named character.
 - Require two independent full-resolution audits and resolve any routed second review.
 - Treat contact sheets as orientation only.
 
@@ -13,6 +14,7 @@
 - Require a full-resolution artifact for the original, candidate, and canonical side-by-side comparison.
 - Use blind review: inspect the candidate against locked facts without trusting the generator's claimed result.
 - Preserve panel geometry, composition, people, skin, hair, facial hair, clothing, props, recurring extras, scene axis, line work, color, texture, and detail density.
+- Compare each candidate against the confirmed appearance matrix and reject any same-character skin-tone category jump, including a drift attributed only to vague water, shadow, or mood lighting.
 - Reject self-review, stale artifacts, missing hashes, seams, unintended balloons, extra text, and reference contamination.
 
 ## Text review
