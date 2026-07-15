@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import posixpath
 import re
@@ -180,6 +181,7 @@ _V4_TEXT_BLOCK_KEYS = frozenset(
         "source_offsets",
         "source_region_id",
         "layout_lines",
+        "style_lock",
     }
 )
 _V4_TEXT_BLOCK_REQUIRED = _V4_TEXT_BLOCK_KEYS - {"layout_lines"}
@@ -310,7 +312,28 @@ _V4_TEXT_REGION_KEYS = frozenset(
         "reading_order",
         "font_profile",
         "speaker",
+        "style_lock",
     }
+)
+_V4_STYLE_LOCK_KEYS = frozenset(
+    {
+        "font",
+        "font_size_px",
+        "fill_rgba",
+        "stroke_rgba",
+        "stroke_width_px",
+        "letter_spacing_px",
+        "line_spacing_px",
+        "writing_mode",
+        "alignment",
+        "rotation_deg",
+        "anchor",
+        "line_boxes",
+        "style_sha256",
+    }
+)
+_V4_FONT_LOCK_KEYS = frozenset(
+    {"family", "asset_sha256", "match_method", "confidence"}
 )
 _V4_COVERAGE_REVIEW_KEYS = frozenset(
     {
@@ -1730,6 +1753,99 @@ def _normalize_v4_overlap_evidence(value: object) -> dict[tuple[str, str], dict[
     return result
 
 
+def _style_number(value: object, name: str, *, minimum: float | None = None) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number) or (minimum is not None and number < minimum):
+        raise ValueError(f"{name} is outside the allowed range")
+    return number
+
+
+def _rgba(value: object, name: str) -> list[int]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(not isinstance(item, int) or isinstance(item, bool) or not 0 <= item <= 255 for item in value)
+    ):
+        raise ValueError(f"{name} must contain four RGBA integers in [0,255]")
+    return list(value)
+
+
+def _normalize_style_lock(
+    value: object,
+    *,
+    name: str,
+    canvas: Mapping[str, int],
+    block_bbox: list[int],
+    orientation: str,
+) -> dict[str, Any]:
+    style = _mapping(value, name)
+    _unknown_keys(style, _V4_STYLE_LOCK_KEYS, name)
+    if set(style) != _V4_STYLE_LOCK_KEYS:
+        raise ValueError(f"{name} is missing required original style fields")
+    font = _mapping(style["font"], f"{name}.font")
+    _unknown_keys(font, _V4_FONT_LOCK_KEYS, f"{name}.font")
+    if set(font) != _V4_FONT_LOCK_KEYS:
+        raise ValueError(f"{name}.font is incomplete")
+    method = _text(font["match_method"], f"{name}.font.match_method")
+    if method not in {"exact_asset", "reviewed_visual_match"}:
+        raise ValueError(f"{name}.font.match_method is unsupported")
+    confidence = _style_number(
+        font["confidence"], f"{name}.font.confidence", minimum=0.0
+    )
+    if confidence > 1.0 or (method == "exact_asset" and confidence != 1.0) or confidence < 0.95:
+        raise ValueError(f"{name}.font confidence is insufficient; block promotion")
+    normalized_font = {
+        "family": _text(font["family"], f"{name}.font.family"),
+        "asset_sha256": _sha256(font["asset_sha256"], f"{name}.font.asset_sha256"),
+        "match_method": method,
+        "confidence": confidence,
+    }
+    writing_mode = _text(style["writing_mode"], f"{name}.writing_mode")
+    if writing_mode not in {"horizontal-tb", "vertical-rl", "vertical-lr"}:
+        raise ValueError(f"{name}.writing_mode is unsupported")
+    alignment = _text(style["alignment"], f"{name}.alignment")
+    if alignment not in {"left", "center", "right", "justify"}:
+        raise ValueError(f"{name}.alignment is unsupported")
+    anchor = style["anchor"]
+    if not isinstance(anchor, list) or len(anchor) != 2:
+        raise ValueError(f"{name}.anchor must contain x and y")
+    normalized_anchor = [
+        _style_number(anchor[0], f"{name}.anchor[0]", minimum=0.0),
+        _style_number(anchor[1], f"{name}.anchor[1]", minimum=0.0),
+    ]
+    if normalized_anchor[0] > canvas["width"] or normalized_anchor[1] > canvas["height"]:
+        raise ValueError(f"{name}.anchor must remain on the source canvas")
+    raw_line_boxes = style["line_boxes"]
+    if not isinstance(raw_line_boxes, list) or not raw_line_boxes:
+        raise ValueError(f"{name}.line_boxes must preserve every original line")
+    line_boxes = [
+        _bbox(item, f"{name}.line_boxes[{index}]", canvas=canvas)
+        for index, item in enumerate(raw_line_boxes)
+    ]
+    body = {
+        "font": normalized_font,
+        "font_size_px": _style_number(style["font_size_px"], f"{name}.font_size_px", minimum=1.0),
+        "fill_rgba": _rgba(style["fill_rgba"], f"{name}.fill_rgba"),
+        "stroke_rgba": _rgba(style["stroke_rgba"], f"{name}.stroke_rgba"),
+        "stroke_width_px": _style_number(style["stroke_width_px"], f"{name}.stroke_width_px", minimum=0.0),
+        "letter_spacing_px": _style_number(style["letter_spacing_px"], f"{name}.letter_spacing_px"),
+        "line_spacing_px": _style_number(style["line_spacing_px"], f"{name}.line_spacing_px"),
+        "writing_mode": writing_mode,
+        "alignment": alignment,
+        "rotation_deg": _style_number(style["rotation_deg"], f"{name}.rotation_deg"),
+        "anchor": normalized_anchor,
+        "line_boxes": line_boxes,
+    }
+    if not -180.0 <= body["rotation_deg"] <= 180.0:
+        raise ValueError(f"{name}.rotation_deg must be in [-180,180]")
+    digest = _sha256(style["style_sha256"], f"{name}.style_sha256")
+    if digest != canonical_hash(body):
+        raise ValueError(f"{name}.style_sha256 does not match original style content")
+    return {**body, "style_sha256": digest}
+
+
 def _normalize_text_inventory(
     value: object,
     *,
@@ -1809,7 +1925,7 @@ def _normalize_text_inventory(
             f"source_text_inventory.regions[{index}]",
         )
         if set(region) != _V4_TEXT_REGION_KEYS:
-            raise ValueError("inventory region is missing required fields")
+            raise ValueError("inventory region is missing required fields including style_lock")
         region_id = _text(region["region_id"], "inventory region_id")
         if region_id in seen_ids:
             raise ValueError("inventory region_id must be unique")
@@ -1866,12 +1982,20 @@ def _normalize_text_inventory(
                 review["evidence_sha256"], "inventory region review.evidence_sha256"
             ),
         }
+        region_bbox = _bbox(region["bbox"], "inventory region", canvas=canvas)
+        style_lock = _normalize_style_lock(
+            region["style_lock"],
+            name="inventory region style_lock",
+            canvas=canvas,
+            block_bbox=region_bbox,
+            orientation=orientation,
+        )
         regions.append(
             {
                 "region_id": region_id,
                 "kind": kind,
                 "shape": shape,
-                "bbox": _bbox(region["bbox"], "inventory region", canvas=canvas),
+                "bbox": region_bbox,
                 "source_balloon_exists": source_balloon_exists,
                 "source_text_sha256": _sha256(
                     region["source_text_sha256"],
@@ -1883,6 +2007,7 @@ def _normalize_text_inventory(
                 "reading_order": reading_order,
                 "font_profile": font_profile,
                 "speaker": _text(region["speaker"], "inventory region speaker"),
+                "style_lock": style_lock,
             }
         )
     if ordinary_text != bool(regions):
@@ -2070,6 +2195,13 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         if font_profile not in _V4_FONT_PROFILES[block_type]:
             raise ValueError(f"unsupported font_profile for {block_type}: {font_profile!r}")
         block_bbox = _bbox(block["bbox"], f"blocks[{index}]", canvas=canvas)
+        style_lock = _normalize_style_lock(
+            block["style_lock"],
+            name=f"blocks[{index}].style_lock",
+            canvas=canvas,
+            block_bbox=block_bbox,
+            orientation=orientation,
+        )
         source_balloon_exists = block["source_balloon_exists"]
         if not isinstance(source_balloon_exists, bool):
             raise ValueError("source_balloon_exists must be a boolean")
@@ -2096,9 +2228,10 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
             or inventory_region["reading_order"] != reading_order
             or inventory_region["font_profile"] != font_profile
             or inventory_region["speaker"] != speaker
+            or inventory_region["style_lock"] != style_lock
         ):
             raise ValueError(
-                "block inventory geometry and bbox must exactly match its source region"
+                "block inventory geometry, bbox, and style_lock must exactly match its source region"
             )
 
         offsets = _mapping(block["source_offsets"], f"blocks[{index}].source_offsets")
@@ -2199,6 +2332,7 @@ def _normalize_v4_text_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
             "orientation": orientation,
             "reading_order": reading_order,
             "font_profile": font_profile,
+            "style_lock": style_lock,
             "source_balloon_exists": source_balloon_exists,
             "source_text": source_text,
             "replacement_text": replacement,

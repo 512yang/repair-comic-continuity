@@ -5,7 +5,7 @@ description: Audit and repair Chinese comic pages against a novel, character ref
 
 # Repair Comic Continuity
 
-Use the `continuity_v4` pipeline. The coordinator audits first, changes only proven defects, and treats every generated or externally typeset image as an untrusted candidate until independent review promotes it.
+Use the `continuity_v5_unified` pipeline. It retains the hash-bound `continuity_v4` evidence contracts while embedding the text-repair engine, reviewed fonts, LaMa routing, deterministic typesetting, and text QA in this one Skill. Treat every generated or typeset image as an untrusted candidate until independent review promotes it.
 
 ## Required references
 
@@ -13,6 +13,7 @@ Use the `continuity_v4` pipeline. The coordinator audits first, changes only pro
 - Read [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) before clustering, scheduling, canary release, audit-only work, or promotion.
 - Read [failure-learning.md](references/failure-learning.md) before retrying, pausing a lane, promoting a learned rule, or revoking one.
 - Read [qa-checklist.md](references/qa-checklist.md) before candidate review and final validation.
+- Read [text-engine.md](references/text-engine.md) before detecting, removing, rebuilding, rendering, or reviewing ordinary text.
 
 ## Immutable pipeline order
 
@@ -21,9 +22,10 @@ Use the `continuity_v4` pipeline. The coordinator audits first, changes only pro
 3. Confirm per-page novel alignment with source offsets and evidence.
 4. Build semantic scene clusters, reference packs, and `entity_state_timeline.json`.
 5. Run full-resolution dual audits before generation; contact sheets are orientation aids only and are never pass evidence.
-6. Assign exactly one page class: `unchanged`, `text_only`, `full_page_redraw`, or `evidence_blocked`.
-7. Release only approved tasks. Use a canary before expensive work in a cluster.
-8. Run class-specific preflight, independent page review, cluster review, and final read-only validation.
+6. Build a complete text-region inventory and hash-bound original `style_lock` for every ordinary-text block. Missing or low-confidence evidence is `evidence_blocked`.
+7. Assign exactly one page class: `unchanged`, `text_only`, `full_page_redraw`, or `evidence_blocked`.
+8. Release only approved tasks. Use a canary before expensive work in a cluster.
+9. Run class-specific preflight, independent page review, cluster review, and final read-only validation.
 
 Do not skip ahead. Audit uncertainty remains `evidence_blocked`; it is never silently treated as a correct page or a redraw instruction.
 
@@ -38,11 +40,15 @@ The visual policy is `continuity_first_full_page`:
 
 Non-critical pose, grip, camera, or expression variation is not a defect when it preserves story meaning and continuity. A character merely holding an object differently from the prose is not sufficient reason to redraw.
 
-For a redraw, capture all ordinary text first, then generate a full-page textless candidate. Do not ask the image model to typeset Chinese. Restore text only after the image candidate passes. If text recognition is unreliable, remove all ordinary text and rebuild every declared block from novel-backed text geometry. Preserve only reviewed art text and sound effects.
+For a redraw, capture all ordinary text first, then generate a full-page textless candidate. Do not ask the image model to typeset Chinese. Restore text only after the image candidate passes. The default policy is `page_reset_preserve_style`: remove all ordinary text and rebuild every ordinary-text block on every text-bearing page because malformed glyphs can survive OCR. Preserve only reviewed art text and sound effects.
 
 ## Text geometry contract
 
-Bind every block to page, panel, balloon, speaker, original rectangle or polygon, source text, replacement text, and exact novel offsets. Preserve the original reading order, balloon style, placement, and density. Never add a new dialogue balloon unless source evidence explicitly requires one.
+Bind every block to page, panel, balloon, speaker, original rectangle or polygon, source text, replacement text, exact novel offsets, and a hash-bound `style_lock`. Preserve the original font or independently reviewed visual equivalent, font asset hash, confidence, fill and stroke colors, font size, stroke width, letter and line spacing, writing mode, alignment, rotation, anchor, line boxes, reading order, balloon style, placement, and density. Never add a new dialogue balloon unless source evidence explicitly requires one.
+
+Use only the embedded engine in `scripts/text_engine_pipeline.py`, `scripts/text_style_contract.py`, `scripts/comic_repair/`, and `assets/text_fonts/`. Do not require or import `D:\漫画文字修复`, another text-repair Skill, or an external font project. LaMa weights may live in the Skill runtime cache or `REPAIR_COMIC_LAMA_ROOT`; missing runtime evidence blocks complex-background cleaning instead of triggering a weak fallback.
+
+Do not silently shrink, reflow, recolor, recenter, rotate, or substitute a font. Keep the original line count and line boxes. If replacement text cannot fit under the locked style and geometry, mark `text_overflow` and route to reviewed layout adjustment; never drop characters or save an overflowed page.
 
 Use deterministic rendering for Chinese glyphs. A machine OCR match does not prove that a glyph is visually correct; review malformed strokes such as `强` and `遇` at full resolution. If a page contains too much text, shorten it only with source-faithful wording and preserve the narrative meaning.
 

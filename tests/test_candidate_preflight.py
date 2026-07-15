@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from pipeline_contracts import canonical_hash  # noqa: E402
 from test_prompt_compiler import (  # noqa: E402
+    base_style_lock,
     base_v4_spec,
     base_v4_text_spec,
     refresh_text_inventory,
@@ -146,12 +147,16 @@ class CandidatePreflightTests(unittest.TestCase):
                 )
         region = spec["source_text_inventory"]["regions"][0]
         region["bbox"] = [20, 160, 220, 230]
+        region["style_lock"] = base_style_lock(
+            bbox=(20, 160, 220, 230), line_box=(20, 160, 220, 195)
+        )
         spec["source_text_inventory"].update(source_page_sha256=source_hash)
         spec["source_text_inventory"]["coverage_review"].update(
             source_page_sha256=source_hash,
             inspected_bbox=[0, 0, 256, 256],
         )
         spec["blocks"][0].update(bbox=[20, 160, 220, 230])
+        spec["blocks"][0]["style_lock"] = copy.deepcopy(region["style_lock"])
         spec["page_density_budget"].update(
             max_page_chars_per_10000_px2=100,
             max_block_chars_per_10000_px2=100,
@@ -323,6 +328,7 @@ class CandidatePreflightTests(unittest.TestCase):
                             ).hexdigest(),
                             "bbox": bbox,
                             "crop_sha256": crop_hash,
+                            "style_lock": copy.deepcopy(block["style_lock"]),
                         }
                     )
         return {

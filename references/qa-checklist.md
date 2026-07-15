@@ -19,6 +19,8 @@
 
 - Compare each block with its novel-backed source slice and speaker.
 - Preserve the original geometry, reading order, balloon style, and density.
+- Compare every rendered block with its source `style_lock`: font asset, fill/stroke color, font size, spacing, writing mode, alignment, rotation, anchor, and original line boxes must match exactly.
+- Reject font fallback, confidence below `0.95`, changed line count, silent shrink/reflow, `text_overflow`, or any newly created balloon.
 - Inspect every Chinese glyph visually; OCR equality does not excuse a malformed glyph.
 - Check `强`, `遇`, punctuation, art text, sound effects, and residual text at full resolution.
 - Do not allow text repair to alter artwork.

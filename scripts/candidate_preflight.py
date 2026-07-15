@@ -87,6 +87,23 @@ DEFAULT_THRESHOLDS = {
 }
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_STYLE_LOCK_KEYS = frozenset(
+    {
+        "font",
+        "font_size_px",
+        "fill_rgba",
+        "stroke_rgba",
+        "stroke_width_px",
+        "letter_spacing_px",
+        "line_spacing_px",
+        "writing_mode",
+        "alignment",
+        "rotation_deg",
+        "anchor",
+        "line_boxes",
+        "style_sha256",
+    }
+)
 _REPORT_KEYS = frozenset(
     {
         "schema_version",
@@ -311,6 +328,44 @@ def _canonical_bound_mapping(value: object, name: str, hash_field: str) -> dict[
     return dict(source)
 
 
+def _validated_style_lock(value: object, name: str) -> dict[str, Any]:
+    style = _mapping(value, name)
+    _exact_keys(style, _STYLE_LOCK_KEYS, name)
+    digest = _sha256_value(style["style_sha256"], f"{name}.style_sha256")
+    body = {key: style[key] for key in style if key != "style_sha256"}
+    if digest != canonical_hash(body):
+        raise ValueError(f"{name}.style_sha256 does not match style content")
+    return dict(style)
+
+
+def validate_render_style_contract(
+    expected_blocks: object, rendered_blocks: object
+) -> bool:
+    """Fail closed unless every rendered block keeps its exact source style and geometry."""
+    if not isinstance(expected_blocks, list) or not isinstance(rendered_blocks, list):
+        raise ValueError("style contract blocks must be lists")
+    if len(expected_blocks) != len(rendered_blocks):
+        raise ValueError("style contract must exactly cover every rendered block")
+    for index, (expected_value, actual_value) in enumerate(
+        zip(expected_blocks, rendered_blocks)
+    ):
+        expected = _mapping(expected_value, f"expected style block[{index}]")
+        actual = _mapping(actual_value, f"rendered style block[{index}]")
+        if actual.get("block_id") != expected.get("block_id"):
+            raise ValueError("rendered style block order/id drift")
+        if list(actual.get("bbox", [])) != list(expected.get("bbox", [])):
+            raise ValueError("rendered text geometry drift")
+        expected_style = _validated_style_lock(
+            expected.get("style_lock"), f"expected style block[{index}].style_lock"
+        )
+        actual_style = _validated_style_lock(
+            actual.get("style_lock"), f"rendered style block[{index}].style_lock"
+        )
+        if actual_style != expected_style:
+            raise ValueError("rendered text style or geometry drift")
+    return True
+
+
 def _normalize_text_declaration(value: object, original_hash: str, size: list[int]) -> dict[str, Any]:
     declaration = _canonical_bound_mapping(
         value, "text_declaration", "declaration_hash"
@@ -376,6 +431,15 @@ def _normalize_text_declaration(value: object, original_hash: str, size: list[in
         seen_regions.add(region_id)
         if list(row.get("bbox", [])) != list(region_ids[region_id].get("bbox", [])):
             raise ValueError("text declaration block geometry must match inventory")
+        block_style = _validated_style_lock(
+            row.get("style_lock"), f"text declaration blocks[{index}].style_lock"
+        )
+        inventory_style = _validated_style_lock(
+            region_ids[region_id].get("style_lock"),
+            f"text inventory regions[{region_id}].style_lock",
+        )
+        if block_style != inventory_style:
+            raise ValueError("text declaration block style must match source inventory")
     if declaration["source_has_ordinary_text"] is False and blocks:
         raise ValueError("text-only repair cannot introduce text on a no-text page")
     if declaration["source_has_ordinary_text"] is True and set(region_ids) != seen_regions:
@@ -628,7 +692,14 @@ def _validate_text_machine_evidence(
         _exact_keys(
             row,
             frozenset(
-                {"block_id", "rendered_text", "rendered_text_sha256", "bbox", "crop_sha256"}
+                {
+                    "block_id",
+                    "rendered_text",
+                    "rendered_text_sha256",
+                    "bbox",
+                    "crop_sha256",
+                    "style_lock",
+                }
             ),
             "render_manifest block",
         )
@@ -643,6 +714,7 @@ def _validate_text_machine_evidence(
         ):
             raise ValueError("render_manifest block text/bbox/crop mismatch")
         normalized_rows.append(dict(row))
+    validate_render_style_contract(blocks, normalized_rows)
     with Image.frombytes("RGBA", tuple(candidate_snapshot["size"]), candidate_snapshot["rgba_bytes"]) as candidate_image, Image.frombytes(
         "RGBA", tuple(original_snapshot["size"]), original_snapshot["rgba_bytes"]
     ) as original_image:

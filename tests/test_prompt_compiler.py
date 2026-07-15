@@ -238,6 +238,29 @@ def base_v4_spec():
     }
 
 
+def base_style_lock(*, bbox=(100, 120, 420, 330), line_box=(100, 120, 420, 170)):
+    body = {
+        "font": {
+            "family": "Noto Sans SC",
+            "asset_sha256": "a" * 64,
+            "match_method": "exact_asset",
+            "confidence": 1.0,
+        },
+        "font_size_px": 32.0,
+        "fill_rgba": [18, 18, 18, 255],
+        "stroke_rgba": [255, 255, 255, 0],
+        "stroke_width_px": 0.0,
+        "letter_spacing_px": 0.0,
+        "line_spacing_px": 6.0,
+        "writing_mode": "horizontal-tb",
+        "alignment": "left",
+        "rotation_deg": 0.0,
+        "anchor": [float(bbox[0]), float(bbox[1])],
+        "line_boxes": [list(line_box)],
+    }
+    return {**body, "style_sha256": canonical_hash(body)}
+
+
 def base_v4_text_spec():
     novel_text = "他在水里练功，最近修炼遇到瓶颈。"
     novel_hash = hashlib.sha256(novel_text.encode("utf-8")).hexdigest()
@@ -256,6 +279,7 @@ def base_v4_text_spec():
         "orientation": "horizontal",
         "reading_order": 1,
         "font_profile": "dialogue_regular",
+        "style_lock": base_style_lock(),
         "speaker": "邓正虎",
     }
     inventory_body = {
@@ -320,6 +344,7 @@ def base_v4_text_spec():
                 "orientation": "horizontal",
                 "reading_order": 1,
                 "font_profile": "dialogue_regular",
+                "style_lock": base_style_lock(),
                 "source_balloon_exists": True,
                 "source_text": source_text,
                 "replacement_text": novel_text[0:8],
