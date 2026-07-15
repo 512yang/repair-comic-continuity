@@ -351,4 +351,3 @@ The Skill revision is accepted only when:
 - no project image processing occurs during reusable-Skill validation;
 - the installed Skill copy matches the validated repository revision;
 - GitHub receives the reviewed, committed revision only after local validation passes.
-
