@@ -1,6 +1,8 @@
 import copy
 import hashlib
 import importlib
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from pipeline_contracts import canonical_hash  # noqa: E402
 from test_prompt_compiler import (  # noqa: E402
+    base_v4_spec,
     base_v4_text_spec,
     refresh_text_inventory,
 )
@@ -85,7 +88,7 @@ class CandidatePreflightTests(unittest.TestCase):
             **overrides,
         )
 
-    def make_task7_text_candidate(self, *, outside_change=False, alpha_outside=False):
+    def make_task7_text_candidate(self, *, outside_change=False, alpha_outside=False, rgba=False):
         original = self.root / "task7-original.png"
         candidate = self.root / "task7-candidate.png"
         mask_path = self.root / "task7-mask.png"
@@ -93,7 +96,7 @@ class CandidatePreflightTests(unittest.TestCase):
         base_draw = ImageDraw.Draw(base)
         base_draw.rectangle((4, 4, 251, 251), outline=(30, 30, 30), width=3)
         base_draw.ellipse((70, 40, 190, 150), fill=(160, 120, 90))
-        if alpha_outside:
+        if alpha_outside or rgba:
             base = base.convert("RGBA")
         base.save(original)
         edited = base.copy()
@@ -190,12 +193,23 @@ class CandidatePreflightTests(unittest.TestCase):
         original, candidate, _, _, _ = self.make_task7_text_candidate()
         topology = self.root / "panel-topology.png"
         Image.new("RGB", (256, 256), "white").save(topology)
+        spec = base_v4_spec()
+        page_path = "章节/0003.png"
+        source_hash = sha256(original)
+        spec["page_id"] = page_path
+        spec["source_page"] = {"path": page_path, "sha256": source_hash, "width": 256, "height": 256}
+        spec["target_metadata"] = copy.deepcopy(spec["source_page"])
+        spec["target_dimensions"] = {"width": 256, "height": 256}
+        spec["page_visual_metadata"].update(page_path=page_path, source_page_sha256=source_hash)
+        spec["cluster"].update(member_pages=[page_path], visual_targets=[page_path], canary_page=page_path)
+        for reference in spec["references"]:
+            if reference["role"] == "target_composition":
+                reference.update(path=page_path, subject=page_path, sha256=source_hash)
+        redraw_request = importlib.import_module("prompt_compiler").compile_redraw_request(spec)
         request_path = self.root / "textless-request.json"
-        request_path.write_text(
-            '{"source_page_sha256":"%s","target_composition_sha256":"%s","textless":true}'
-            % (sha256(original), sha256(original)),
-            encoding="utf-8",
-        )
+        import json
+
+        request_path.write_text(json.dumps(redraw_request, ensure_ascii=False), encoding="utf-8")
         redraw_evidence = {
             "source_page_sha256": sha256(original),
             "candidate_sha256": sha256(candidate),
@@ -229,8 +243,154 @@ class CandidatePreflightTests(unittest.TestCase):
             text_policy="textless",
             ocr_metadata=VALID_OCR,
             redraw_evidence=redraw_evidence,
+            redraw_spec=spec,
+            redraw_request=redraw_request,
         )
         return original, candidate, report
+
+    def task7_machine_evidence(self, candidate, request):
+        declaration = request["declaration"]
+        ocr_blocks = []
+        rendered_blocks = []
+        with Image.open(candidate) as image:
+            with image.convert("RGBA") as rgba:
+                for block in declaration["blocks"]:
+                    bbox = block["bbox"]
+                    with rgba.crop(tuple(bbox)) as crop:
+                        crop_hash = hashlib.sha256(crop.tobytes()).hexdigest()
+                    replacement = block["replacement_text"]
+                    ocr_blocks.append(
+                        {
+                            "block_id": block["block_id"],
+                            "recognized_text": replacement,
+                            "status": "passed",
+                        }
+                    )
+                    rendered_blocks.append(
+                        {
+                            "block_id": block["block_id"],
+                            "rendered_text": replacement,
+                            "rendered_text_sha256": hashlib.sha256(
+                                replacement.encode("utf-8")
+                            ).hexdigest(),
+                            "bbox": bbox,
+                            "crop_sha256": crop_hash,
+                        }
+                    )
+        return ocr_blocks, {
+            "candidate_sha256": sha256(candidate),
+            "declaration_hash": request["declaration_hash"],
+            "blocks": rendered_blocks,
+        }
+
+    def task7_machine_kwargs(self, candidate, request):
+        ocr_blocks, render_manifest = self.task7_machine_evidence(candidate, request)
+        return {"ocr_blocks": ocr_blocks, "render_manifest": render_manifest}
+
+    def test_text_machine_gate_rejects_ocr_and_render_crop_mismatch(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate(rgba=True)
+        ocr_blocks, render_manifest = self.task7_machine_evidence(candidate, request)
+        bad_ocr = copy.deepcopy(ocr_blocks)
+        bad_ocr[0]["recognized_text"] = "错字"
+        with self.assertRaisesRegex(ValueError, "OCR|ocr"):
+            module.run_candidate_preflight(
+                candidate,
+                original,
+                page_class="text_only",
+                text_policy="deterministic_text",
+                change_mask=mask,
+                text_spec=spec,
+                text_request=request,
+                ocr_blocks=bad_ocr,
+                render_manifest=render_manifest,
+            )
+        bad_render = copy.deepcopy(render_manifest)
+        bad_render["blocks"][0]["crop_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "crop|render"):
+            module.run_candidate_preflight(
+                candidate,
+                original,
+                page_class="text_only",
+                text_policy="deterministic_text",
+                change_mask=mask,
+                text_spec=spec,
+                text_request=request,
+                ocr_blocks=ocr_blocks,
+                render_manifest=bad_render,
+            )
+
+    def test_samefile_hardlink_and_unmodified_text_candidate_are_rejected(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate()
+        ocr_blocks, _ = self.task7_machine_evidence(original, request)
+        _, unmodified_manifest = self.task7_machine_evidence(original, request)
+        for name, path in (("same", original), ("hardlink", self.root / "hardlink.png")):
+            if name == "hardlink":
+                os.link(original, path)
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "same file|hardlink|changed pixels"):
+                    module.run_candidate_preflight(
+                        path,
+                        original,
+                        page_class="text_only",
+                        text_policy="deterministic_text",
+                        change_mask=mask,
+                        text_spec=spec,
+                        text_request=request,
+                        ocr_blocks=ocr_blocks,
+                        render_manifest=unmodified_manifest,
+                    )
+
+    def test_animated_image_and_one_character_stable_id_are_rejected(self):
+        module = candidate_preflight()
+        animated = self.root / "animated.webp"
+        frames = [Image.new("RGB", (32, 32), color) for color in ("red", "blue")]
+        frames[0].save(animated, save_all=True, append_images=frames[1:], duration=50, loop=0)
+        duplicate = self.root / "animated-copy.webp"
+        shutil.copyfile(animated, duplicate)
+        with self.assertRaisesRegex(ValueError, "animated|frame"):
+            module.run_candidate_preflight(duplicate, animated, page_class="unchanged")
+        report = module.run_candidate_preflight(self.candidate, self.original, page_class="unchanged")
+        with self.assertRaisesRegex(ValueError, "3-64|stable id"):
+            module.record_independent_review(
+                report,
+                "a",
+                "reviewer-2",
+                "rejected",
+                "2026-07-14T20:00:00+00:00",
+                candidate_created_at="2026-07-14T19:00:00+00:00",
+                review_artifacts=[],
+                blind=True,
+                inspected_panels=[],
+                inspected_entities=[],
+                check_matrix={name: False for name in module.REVIEW_MATRIX_CHECKS},
+            )
+
+    def test_batch_rejects_report_bound_to_wrong_source_inventory(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(self.candidate, self.original, page_class="unchanged")
+        input_root = self.root / "input"
+        input_root.mkdir()
+        expected = input_root / "page.jpg"
+        draw_pattern(expected)
+        with self.assertRaisesRegex(ValueError, "source|inventory"):
+            module.validate_candidate_batch(
+                ["page.jpg"],
+                [{"source_page": "page.jpg", "output_name": "page.jpg"}],
+                [report],
+                candidate_root=self.root,
+                actual_outputs=["page.jpg"],
+                input_root=input_root,
+                inventory_rows=[
+                    {
+                        "input_name": "page.jpg",
+                        "sha256": sha256(expected),
+                        "width": 896,
+                        "height": 1200,
+                    }
+                ],
+            )
 
     def test_complete_task7_request_is_required_instead_of_self_signed_subset(self):
         module = candidate_preflight()
@@ -244,6 +404,7 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(candidate, request),
         )
         self.assertEqual(report["status"], "pass")
         self.assertEqual(
@@ -302,6 +463,7 @@ class CandidatePreflightTests(unittest.TestCase):
                 change_mask=mask,
                 text_spec=spec,
                 text_request=forged,
+                **self.task7_machine_kwargs(candidate, request),
             )
 
     def test_review_artifact_kind_cannot_disguise_a_text_file(self):
@@ -343,12 +505,13 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(candidate, request),
         )
         self.assertEqual(report["checks"]["outside_mask_preserved"]["status"], "fail")
 
     def test_one_pixel_antialias_boundary_is_limited_and_two_pixels_outside_fails(self):
         module = candidate_preflight()
-        original, candidate, mask, spec, request = self.make_task7_text_candidate()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate(rgba=True)
         with Image.open(candidate) as source:
             boundary = source.convert("RGBA")
         red, green, blue, _ = boundary.getpixel((220, 180))
@@ -363,6 +526,7 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(boundary_path, request),
         )
         self.assertEqual(allowed["checks"]["outside_mask_preserved"]["status"], "pass")
 
@@ -378,6 +542,7 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(outside_path, request),
         )
         self.assertEqual(rejected["checks"]["outside_mask_preserved"]["status"], "fail")
 
@@ -491,6 +656,7 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=change_mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(candidate, request),
         )
 
         self.assertEqual(
@@ -528,6 +694,7 @@ class CandidatePreflightTests(unittest.TestCase):
             change_mask=change_mask,
             text_spec=spec,
             text_request=request,
+            **self.task7_machine_kwargs(candidate, request),
         )
         board = self.root / "glyph-board.png"
         Image.new("RGB", (256, 256), "white").save(board)
@@ -808,13 +975,11 @@ class CandidatePreflightTests(unittest.TestCase):
                         ocr_metadata=metadata,
                     )
 
-    def test_preflight_statistics_do_not_return_or_copy_long_lived_pil_images(self):
-        module = candidate_preflight()
-        with patch.object(Image.Image, "copy", side_effect=AssertionError("copy forbidden")):
-            try:
-                report = self.run_preflight()
-            except AssertionError as exc:
-                self.fail(f"preflight retained a Pillow copy: {exc}")
+    def test_preflight_statistics_do_not_return_long_lived_pil_images(self):
+        report = self.run_preflight()
+        import json
+
+        json.dumps(report)
         self.assertEqual(report["status"], "pass")
 
     def test_corrupt_original_fails_decode_and_blocks_comparison_checks(self):

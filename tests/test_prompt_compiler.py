@@ -1009,6 +1009,16 @@ class TextRepairPromptCompilerTests(unittest.TestCase):
 
 
 class V4FullPageRedrawCompilerTests(unittest.TestCase):
+    def test_public_redraw_validator_recompiles_exact_request(self):
+        module = prompt_compiler()
+        spec = base_v4_spec()
+        request = module.compile_redraw_request(spec)
+        self.assertEqual(request, module.validate_v4_redraw_request(spec, request))
+        forged = copy.deepcopy(request)
+        forged["source_page_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "redraw request"):
+            module.validate_v4_redraw_request(spec, forged)
+
     def test_default_visual_profile_is_full_page_textless_and_topology_locked(self):
         module = prompt_compiler()
         spec = base_v4_spec()

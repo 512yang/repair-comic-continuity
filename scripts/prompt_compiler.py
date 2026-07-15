@@ -1565,6 +1565,20 @@ def compile_redraw_request(spec: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_v4_redraw_request(
+    spec: Mapping[str, Any], request: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Recompile and exactly verify a complete V4 full-page redraw request."""
+    if not isinstance(spec, Mapping) or spec.get("contract_version") != "v4":
+        raise ValueError("V4 redraw spec must use contract_version v4")
+    if not isinstance(request, Mapping):
+        raise ValueError("V4 redraw request must be a mapping")
+    expected = compile_redraw_request(spec)
+    if dict(request) != expected:
+        raise ValueError("V4 redraw request does not match the validated complete spec")
+    return json.loads(json.dumps(expected, ensure_ascii=False))
+
+
 def _graphemes(value: str) -> list[str]:
     """Small deterministic grapheme segmenter for combining/VS/ZWJ sequences."""
     result: list[str] = []

@@ -8,6 +8,8 @@ import math
 import os
 import re
 import unicodedata
+import warnings
+from io import BytesIO
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ from pipeline_contracts import (
     validate_bijection,
 )
 from prompt_compiler import validate_v4_text_repair_request
+from prompt_compiler import validate_v4_redraw_request
 
 
 SCHEMA_VERSION = "1.0"
@@ -72,7 +75,9 @@ REVIEW_MATRIX_CHECKS = (
     "preflight_binding",
 )
 TEXT_REVIEW_CHECKS: tuple[str, ...] = ()
-_STABLE_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]{1,62}[a-z0-9])?\Z")
+_STABLE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]\Z")
+MAX_IMAGE_PIXELS = 100_000_000
+MAX_IMAGE_BYTES = 512 * 1024 * 1024
 DEFAULT_THRESHOLDS = {
     "min_grayscale_variance": 20.0,
     "max_edge_density_delta": 0.12,
@@ -108,6 +113,11 @@ _V4_REPORT_KEYS = _REPORT_KEYS | {
     "text_spec",
     "text_request",
     "text_request_binding",
+    "ocr_blocks",
+    "render_manifest",
+    "redraw_spec",
+    "redraw_request",
+    "redraw_request_binding",
 }
 _REVIEW_KEYS = frozenset(
     {
@@ -189,7 +199,10 @@ def _path(value: object, name: str) -> Path:
     raw = os.fspath(value)
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"{name} must be a file path")
-    path = Path(raw).expanduser().resolve()
+    unresolved = Path(raw).expanduser()
+    if unresolved.is_symlink():
+        raise ValueError(f"{name} must not be a symlink")
+    path = unresolved.resolve()
     if not path.is_file():
         raise ValueError(f"{name} must exist and be a file")
     return path
@@ -201,6 +214,51 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _image_snapshot(path: Path, name: str, edge_threshold: int) -> dict[str, Any]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{name} read_error") from exc
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"{name} image_too_large")
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                if getattr(image, "n_frames", 1) != 1:
+                    raise ValueError(f"{name} animated_image_not_allowed")
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise ValueError(f"{name} image_pixel_limit")
+                orientation = image.getexif().get(274)
+                if orientation not in (None, 1):
+                    raise ValueError(f"{name} exif_orientation_not_allowed")
+                image.load()
+                mode = image.mode
+                icc = image.info.get("icc_profile")
+                if icc is not None and not isinstance(icc, bytes):
+                    raise ValueError(f"{name} invalid_icc_profile")
+                with image.convert("RGB") as rgb:
+                    metrics = _image_metrics(rgb, edge_threshold)
+                with image.convert("RGBA") as rgba:
+                    rgba_bytes = rgba.tobytes()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError(f"{name} decompression_bomb") from exc
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise ValueError(f"{name} corrupt_image") from exc
+    return {
+        "path": str(path),
+        "bytes": data,
+        "sha256": digest,
+        "size": metrics["size"],
+        "mode": mode,
+        "icc_sha256": hashlib.sha256(icc).hexdigest() if icc is not None else None,
+        "orientation": orientation,
+        "metrics": metrics,
+        "rgba_bytes": rgba_bytes,
+    }
 
 
 def _sha256_value(value: object, name: str) -> str:
@@ -371,13 +429,110 @@ def _normalize_change_mask(
     }, mask
 
 
+def _crop_rgba_sha(snapshot: Mapping[str, Any], bbox: list[int]) -> str:
+    with Image.frombytes(
+        "RGBA", tuple(snapshot["size"]), snapshot["rgba_bytes"]
+    ) as image, image.crop(tuple(bbox)) as crop:
+        return hashlib.sha256(crop.tobytes()).hexdigest()
+
+
+def _validate_text_machine_evidence(
+    ocr_blocks: object,
+    render_manifest: object,
+    *,
+    declaration: Mapping[str, Any],
+    candidate_snapshot: Mapping[str, Any],
+    original_snapshot: Mapping[str, Any],
+    mask: Image.Image,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    blocks = declaration["blocks"]
+    if not isinstance(ocr_blocks, list):
+        raise ValueError("OCR blocks must be a list")
+    if len(ocr_blocks) != len(blocks):
+        raise ValueError("OCR blocks must exactly cover Task 7 blocks")
+    normalized_ocr: list[dict[str, Any]] = []
+    for expected, actual in zip(blocks, ocr_blocks):
+        row = _mapping(actual, "OCR block")
+        _exact_keys(row, frozenset({"block_id", "recognized_text", "status"}), "OCR block")
+        if row["block_id"] != expected["block_id"] or row["status"] != "passed":
+            raise ValueError("OCR block coverage/status mismatch")
+        recognized = row["recognized_text"]
+        if not isinstance(recognized, str) or not recognized:
+            raise ValueError("OCR recognized_text must be a nonempty string")
+        if recognized != expected["replacement_text"]:
+            raise ValueError("OCR recognized_text does not match replacement_text")
+        normalized_ocr.append(dict(row))
+    manifest = _mapping(render_manifest, "render_manifest")
+    _exact_keys(
+        manifest,
+        frozenset({"candidate_sha256", "declaration_hash", "blocks"}),
+        "render_manifest",
+    )
+    if (
+        manifest["candidate_sha256"] != candidate_snapshot["sha256"]
+        or manifest["declaration_hash"] != declaration["declaration_hash"]
+    ):
+        raise ValueError("render_manifest candidate/declaration binding mismatch")
+    rows = manifest["blocks"]
+    if not isinstance(rows, list) or len(rows) != len(blocks):
+        raise ValueError("render_manifest must exactly cover Task 7 blocks")
+    normalized_rows: list[dict[str, Any]] = []
+    for expected, actual in zip(blocks, rows):
+        row = _mapping(actual, "render_manifest block")
+        _exact_keys(
+            row,
+            frozenset(
+                {"block_id", "rendered_text", "rendered_text_sha256", "bbox", "crop_sha256"}
+            ),
+            "render_manifest block",
+        )
+        replacement = expected["replacement_text"]
+        if (
+            row["block_id"] != expected["block_id"]
+            or row["rendered_text"] != replacement
+            or row["rendered_text_sha256"]
+            != hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+            or row["bbox"] != expected["bbox"]
+            or row["crop_sha256"] != _crop_rgba_sha(candidate_snapshot, expected["bbox"])
+        ):
+            raise ValueError("render_manifest block text/bbox/crop mismatch")
+        normalized_rows.append(dict(row))
+    with Image.frombytes("RGBA", tuple(candidate_snapshot["size"]), candidate_snapshot["rgba_bytes"]) as candidate_image, Image.frombytes(
+        "RGBA", tuple(original_snapshot["size"]), original_snapshot["rgba_bytes"]
+    ) as original_image:
+        difference = ImageChops.difference(candidate_image, original_image)
+        changed = difference.split()[0].point(lambda value: 255 if value else 0)
+        for channel in difference.split()[1:]:
+            changed = ImageChops.lighter(
+                changed, channel.point(lambda value: 255 if value else 0)
+            )
+        inside_changed = ImageChops.multiply(changed, mask)
+        total_inside = sum(1 for value in inside_changed.getdata() if value)
+        changed_block_ids: list[str] = []
+        for block in blocks:
+            if block["replacement_text"] != block["source_text"]:
+                with inside_changed.crop(tuple(block["bbox"])) as crop:
+                    if crop.getbbox() is None:
+                        raise ValueError("changed text block has no actual changed pixels")
+                changed_block_ids.append(block["block_id"])
+    if total_inside <= 0:
+        raise ValueError("text candidate has no actual changed pixels")
+    return normalized_ocr, {
+        "candidate_sha256": manifest["candidate_sha256"],
+        "declaration_hash": manifest["declaration_hash"],
+        "blocks": normalized_rows,
+    }, {"inside_changed_pixels": total_inside, "changed_block_ids": changed_block_ids}
+
+
 def _outside_mask_check(
-    candidate: Path,
-    original: Path,
+    candidate_snapshot: Mapping[str, Any],
+    original_snapshot: Mapping[str, Any],
     mask: Image.Image,
 ) -> dict[str, Any]:
     try:
-        with Image.open(candidate) as candidate_image, Image.open(original) as original_image:
+        with Image.open(BytesIO(candidate_snapshot["bytes"])) as candidate_image, Image.open(
+            BytesIO(original_snapshot["bytes"])
+        ) as original_image:
             candidate_image.load()
             original_image.load()
             with candidate_image.convert("RGBA") as candidate_rgba, original_image.convert("RGBA") as original_rgba:
@@ -460,6 +615,7 @@ def _normalize_redraw_evidence(
     source_hash: str,
     candidate_hash: str,
     candidate_stage: str,
+    validated_request: Mapping[str, Any],
 ) -> dict[str, Any]:
     source = _mapping(value, "redraw_evidence")
     _exact_keys(
@@ -510,14 +666,8 @@ def _normalize_redraw_evidence(
         request_body = json.loads(Path(request["path"]).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("textless redraw request must be UTF-8 JSON") from exc
-    if not isinstance(request_body, Mapping):
-        raise ValueError("textless redraw request must be a JSON object")
-    if (
-        request_body.get("source_page_sha256") != source_hash
-        or request_body.get("target_composition_sha256") != source_hash
-        or request_body.get("textless") is not True
-    ):
-        raise ValueError("textless redraw request is not bound to current source target")
+    if request_body != dict(validated_request):
+        raise ValueError("textless redraw request artifact is not the complete validated request")
     return {
         "source_page_sha256": source_hash,
         "candidate_sha256": candidate_hash,
@@ -527,6 +677,33 @@ def _normalize_redraw_evidence(
         "target_composition": target,
         "textless_request": request,
     }
+
+
+def _validate_redraw_binding(
+    redraw_spec: object,
+    redraw_request: object,
+    *,
+    source_hash: str,
+    size: list[int],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if not isinstance(redraw_spec, Mapping) or not isinstance(redraw_request, Mapping):
+        raise ValueError("complete V4 redraw_spec and redraw_request are required")
+    validated = validate_v4_redraw_request(redraw_spec, redraw_request)
+    if (
+        validated.get("source_page_sha256") != source_hash
+        or validated.get("target_dimensions") != {"width": size[0], "height": size[1]}
+        or validated.get("textless_output") is not True
+    ):
+        raise ValueError("V4 redraw request is not bound to current source/dimensions")
+    normalized_spec = json.loads(json.dumps(redraw_spec, ensure_ascii=False))
+    binding = {
+        "source_page_sha256": source_hash,
+        "source_page_path": validated["source_page_path"],
+        "prompt_hash": validated["prompt_hash"],
+        "declaration_hash": validated["declaration_hash"],
+        "redraw_spec_sha256": canonical_hash(normalized_spec),
+    }
+    return normalized_spec, validated, binding
 
 
 def _expected_size(value: object) -> list[int]:
@@ -716,6 +893,10 @@ def _compute_preflight_body(
     candidate_stage: object = "final",
     text_spec: object = None,
     text_request: object = None,
+    ocr_blocks: object = None,
+    render_manifest: object = None,
+    redraw_spec: object = None,
+    redraw_request: object = None,
 ) -> dict[str, Any]:
     """Compute a normalized report body without validation recursion."""
     candidate = _path(candidate_path, "candidate_path")
@@ -733,8 +914,26 @@ def _compute_preflight_body(
     limits = _thresholds(thresholds)
 
     edge_threshold = int(limits["edge_pixel_threshold"])
-    candidate_metrics = _verified_metrics(candidate, edge_threshold)
-    original_metrics = _verified_metrics(original, edge_threshold)
+    if explicit_v4:
+        try:
+            if os.path.samefile(candidate, original):
+                raise ValueError("candidate and source must not be the same file or hardlink")
+        except OSError as exc:
+            raise ValueError("candidate/source file identity cannot be verified") from exc
+    try:
+        candidate_snapshot = _image_snapshot(candidate, "candidate", edge_threshold)
+    except ValueError:
+        if explicit_v4:
+            raise
+        candidate_snapshot = None
+    try:
+        original_snapshot = _image_snapshot(original, "original", edge_threshold)
+    except ValueError:
+        if explicit_v4:
+            raise
+        original_snapshot = None
+    candidate_metrics = candidate_snapshot["metrics"] if candidate_snapshot else None
+    original_metrics = original_snapshot["metrics"] if original_snapshot else None
     candidate_ok = candidate_metrics is not None
     original_ok = original_metrics is not None
     both_ok = candidate_ok and original_ok
@@ -754,6 +953,16 @@ def _compute_preflight_body(
         if expected_size is not None and _expected_size(expected_size) != source_size:
             raise ValueError("expected_size must exactly match source dimensions")
         size = list(source_size)
+    if explicit_v4 and candidate_snapshot is not None and original_snapshot is not None:
+        if normalized_class in {"unchanged", "text_only"}:
+            for field in ("mode", "icc_sha256", "orientation"):
+                if candidate_snapshot[field] != original_snapshot[field]:
+                    raise ValueError(f"candidate/source metadata drift: {field}")
+        else:
+            if candidate_snapshot["mode"] not in {"RGB", "RGBA"}:
+                raise ValueError("full redraw candidate mode must be RGB or RGBA")
+            if candidate_snapshot["icc_sha256"] != original_snapshot["icc_sha256"]:
+                raise ValueError("full redraw ICC profile drift")
 
     metrics = {
         "candidate_size": candidate_metrics["size"] if candidate_metrics else None,
@@ -890,8 +1099,12 @@ def _compute_preflight_body(
             else "OCR found ordinary, unexpected, or unallowlisted art text under textless policy",
         )
 
-    candidate_hash = _sha256(candidate)
-    original_hash = _sha256(original)
+    candidate_hash = (
+        candidate_snapshot["sha256"] if candidate_snapshot is not None else _sha256(candidate)
+    )
+    original_hash = (
+        original_snapshot["sha256"] if original_snapshot is not None else _sha256(original)
+    )
     normalized_mask = None
     normalized_declaration = None
     normalized_redraw = None
@@ -899,6 +1112,11 @@ def _compute_preflight_body(
     normalized_text_spec = None
     normalized_text_request = None
     text_request_binding = None
+    normalized_ocr_blocks = None
+    normalized_render_manifest = None
+    normalized_redraw_spec = None
+    normalized_redraw_request = None
+    redraw_request_binding = None
     if explicit_v4:
         normalized_stage = _text(candidate_stage, "candidate_stage")
         if normalized_stage not in {"textless", "final"}:
@@ -936,7 +1154,19 @@ def _compute_preflight_body(
             )
             try:
                 checks["outside_mask_preserved"] = _outside_mask_check(
-                    candidate, original, opened_mask
+                    candidate_snapshot, original_snapshot, opened_mask
+                )
+                (
+                    normalized_ocr_blocks,
+                    normalized_render_manifest,
+                    change_evidence,
+                ) = _validate_text_machine_evidence(
+                    ocr_blocks,
+                    render_manifest,
+                    declaration=normalized_declaration,
+                    candidate_snapshot=candidate_snapshot,
+                    original_snapshot=original_snapshot,
+                    mask=opened_mask,
                 )
             finally:
                 opened_mask.close()
@@ -950,6 +1180,15 @@ def _compute_preflight_body(
                 {"hash_bound": True, "only_declared_blocks": True},
                 "text candidate is bound to declaration, inventory, and exact mask",
             )
+            checks["ocr_text_match"] = _check(
+                "pass", normalized_ocr_blocks, {"exact_block_coverage": True}, "OCR block text exactly matches Task 7 replacements"
+            )
+            checks["render_manifest_bound"] = _check(
+                "pass", normalized_render_manifest, {"candidate_and_crop_bound": True}, "render manifest matches current candidate crops"
+            )
+            checks["inside_mask_changed"] = _check(
+                "pass", change_evidence, {"minimum_inside_changed_pixels": 1}, "declared changed blocks contain actual in-mask pixel changes"
+            )
         else:
             if change_mask is not None:
                 raise ValueError("full_page_redraw cannot use source text-only mask")
@@ -958,12 +1197,23 @@ def _compute_preflight_body(
                     "blocked", None, {"complete": True}, "full-page redraw evidence missing"
                 )
             else:
+                (
+                    normalized_redraw_spec,
+                    normalized_redraw_request,
+                    redraw_request_binding,
+                ) = _validate_redraw_binding(
+                    redraw_spec,
+                    redraw_request,
+                    source_hash=original_hash,
+                    size=size,
+                )
                 normalized_redraw = _normalize_redraw_evidence(
                     redraw_evidence,
                     source_path=original,
                     source_hash=original_hash,
                     candidate_hash=candidate_hash,
                     candidate_stage=normalized_stage,
+                    validated_request=normalized_redraw_request,
                 )
                 if normalized_stage == "textless" and text_declaration is not None:
                     raise ValueError("textless redraw stage cannot carry a text declaration")
@@ -1007,6 +1257,11 @@ def _compute_preflight_body(
                 "text_spec": normalized_text_spec,
                 "text_request": normalized_text_request,
                 "text_request_binding": text_request_binding,
+                "ocr_blocks": normalized_ocr_blocks,
+                "render_manifest": normalized_render_manifest,
+                "redraw_spec": normalized_redraw_spec,
+                "redraw_request": normalized_redraw_request,
+                "redraw_request_binding": redraw_request_binding,
             }
         )
     provenance = {
@@ -1040,6 +1295,11 @@ def _compute_preflight_body(
                 "text_spec": normalized_text_spec,
                 "text_request": normalized_text_request,
                 "text_request_binding": text_request_binding,
+                "ocr_blocks": normalized_ocr_blocks,
+                "render_manifest": normalized_render_manifest,
+                "redraw_spec": normalized_redraw_spec,
+                "redraw_request": normalized_redraw_request,
+                "redraw_request_binding": redraw_request_binding,
             }
         )
     return body
@@ -1059,6 +1319,10 @@ def run_candidate_preflight(
     candidate_stage: object = "final",
     text_spec: object = None,
     text_request: object = None,
+    ocr_blocks: object = None,
+    render_manifest: object = None,
+    redraw_spec: object = None,
+    redraw_request: object = None,
 ) -> dict[str, Any]:
     """Build a deterministic, fully bound machine-preflight report."""
     body = _compute_preflight_body(
@@ -1075,6 +1339,10 @@ def run_candidate_preflight(
         candidate_stage=candidate_stage,
         text_spec=text_spec,
         text_request=text_request,
+        ocr_blocks=ocr_blocks,
+        render_manifest=render_manifest,
+        redraw_spec=redraw_spec,
+        redraw_request=redraw_request,
     )
     return {**body, "preflight_id": _report_id(body)}
 
@@ -1131,7 +1399,13 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
             raise ValueError("page_class is invalid")
         class_checks = {
             "unchanged": ("content_preserved",),
-            "text_only": ("outside_mask_preserved", "text_contract_bound"),
+            "text_only": (
+                "outside_mask_preserved",
+                "text_contract_bound",
+                "ocr_text_match",
+                "render_manifest_bound",
+                "inside_mask_changed",
+            ),
             "full_page_redraw": ("redraw_evidence",),
         }[page_class]
     if tuple(checks) != REQUIRED_CHECKS + class_checks:
@@ -1155,6 +1429,11 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
             "text_spec",
             "text_request",
             "text_request_binding",
+            "ocr_blocks",
+            "render_manifest",
+            "redraw_spec",
+            "redraw_request",
+            "redraw_request_binding",
         }
     _exact_keys(evaluation_inputs, expected_evaluation_keys, "evaluation_inputs")
     normalized_evaluation = {
@@ -1174,6 +1453,11 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 "text_spec": source["text_spec"],
                 "text_request": source["text_request"],
                 "text_request_binding": source["text_request_binding"],
+                "ocr_blocks": source["ocr_blocks"],
+                "render_manifest": source["render_manifest"],
+                "redraw_spec": source["redraw_spec"],
+                "redraw_request": source["redraw_request"],
+                "redraw_request_binding": source["redraw_request_binding"],
             }
         )
     if normalized_evaluation["text_policy"] not in TEXT_POLICIES:
@@ -1230,6 +1514,10 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 candidate_stage=normalized_evaluation.get("candidate_stage", "final"),
                 text_spec=normalized_evaluation.get("text_spec"),
                 text_request=normalized_evaluation.get("text_request"),
+                ocr_blocks=normalized_evaluation.get("ocr_blocks"),
+                render_manifest=normalized_evaluation.get("render_manifest"),
+                redraw_spec=normalized_evaluation.get("redraw_spec"),
+                redraw_request=normalized_evaluation.get("redraw_request"),
             )
         except ValueError as exc:
             raise ValueError("preflight source files cannot be strongly validated") from exc
@@ -1293,6 +1581,22 @@ def _review_artifacts(
     seen_kinds: set[str] = set()
     seen_paths: set[Path] = set()
     source_size = list(report["expected_size"])
+    edge_threshold = int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+    current_source = _image_snapshot(
+        _path(report["paths"]["original"], "current source"),
+        "current source",
+        edge_threshold,
+    )
+    current_candidate = _image_snapshot(
+        _path(report["paths"]["candidate"], "current candidate"),
+        "current candidate",
+        edge_threshold,
+    )
+    if (
+        current_source["sha256"] != report["hashes"]["original"]
+        or current_candidate["sha256"] != report["hashes"]["candidate"]
+    ):
+        raise ValueError("review artifacts cannot bind stale source/candidate snapshots")
     for index, artifact in enumerate(value):
         row = _mapping(artifact, f"review artifact[{index}]")
         _exact_keys(
@@ -1315,7 +1619,13 @@ def _review_artifacts(
             raise ValueError("review artifact paths must be unique")
         seen_paths.add(path)
         digest = _sha256_value(row["sha256"], f"review artifact[{index}].sha256")
-        if _sha256(path) != digest:
+        if path == Path(current_source["path"]):
+            artifact_snapshot = current_source
+        elif path == Path(current_candidate["path"]):
+            artifact_snapshot = current_candidate
+        else:
+            artifact_snapshot = _image_snapshot(path, f"review artifact[{index}]", edge_threshold)
+        if artifact_snapshot["sha256"] != digest:
             raise ValueError("review artifact hash mismatch")
         if row["candidate_sha256"] != report["hashes"]["candidate"]:
             raise ValueError("review artifact candidate hash mismatch")
@@ -1330,9 +1640,7 @@ def _review_artifacts(
         seen_kinds.add(kind)
         if row["source_sha256"] != report["hashes"]["original"]:
             raise ValueError("review artifact source hash mismatch")
-        metrics = _verified_metrics(path, int(DEFAULT_THRESHOLDS["edge_pixel_threshold"]))
-        if metrics is None:
-            raise ValueError("review artifact must be a decodable image")
+        metrics = artifact_snapshot["metrics"]
         if kind == "full_resolution_original":
             if digest != report["hashes"]["original"] or metrics["size"] != source_size:
                 raise ValueError("original review artifact must be exact full-size source image")
@@ -1345,18 +1653,10 @@ def _review_artifacts(
                 raise ValueError("comparison review artifact must be exact two-up full-size dimensions")
             try:
                 with (
-                    Image.open(path) as comparison_source,
-                    Image.open(report["paths"]["original"]) as original_source,
-                    Image.open(report["paths"]["candidate"]) as candidate_source,
+                    Image.frombytes("RGBA", tuple(artifact_snapshot["size"]), artifact_snapshot["rgba_bytes"]) as comparison_rgba,
+                    Image.frombytes("RGBA", tuple(current_source["size"]), current_source["rgba_bytes"]) as original_rgba,
+                    Image.frombytes("RGBA", tuple(current_candidate["size"]), current_candidate["rgba_bytes"]) as candidate_rgba,
                 ):
-                    comparison_source.load()
-                    original_source.load()
-                    candidate_source.load()
-                    with (
-                        comparison_source.convert("RGBA") as comparison_rgba,
-                        original_source.convert("RGBA") as original_rgba,
-                        candidate_source.convert("RGBA") as candidate_rgba,
-                    ):
                         with comparison_rgba.crop(
                             (0, 0, source_size[0], source_size[1])
                         ) as left_half, comparison_rgba.crop(
@@ -1378,7 +1678,7 @@ def _review_artifacts(
                                     ).split()
                                 )
                             )
-            except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 raise ValueError("comparison review artifact cannot be canonically decoded") from exc
             if not left_matches or not right_matches:
                 raise ValueError(
@@ -1754,6 +2054,8 @@ def validate_candidate_batch(
     candidate_root: Path,
     actual_outputs: Iterable[str] | None = None,
     reviews: object = None,
+    input_root: Path | None = None,
+    inventory_rows: object = None,
 ) -> bool:
     """Validate strict source/output bijection and ordered candidate reports."""
     resolved_candidate_root = Path(candidate_root).expanduser().resolve()
@@ -1767,6 +2069,22 @@ def validate_candidate_batch(
     if len(preflight_reports) != len(input_rows):
         raise ValueError("preflight report count must match input count")
     seen_ids: set[str] = set()
+    resolved_input_root = None
+    inventory_by_name: dict[str, Mapping[str, Any]] = {}
+    if input_root is not None or inventory_rows is not None:
+        if input_root is None or not isinstance(inventory_rows, list):
+            raise ValueError("input_root and inventory rows are required together")
+        resolved_input_root = Path(input_root).expanduser().resolve()
+        if not resolved_input_root.is_dir():
+            raise ValueError("input_root must be a directory")
+        for row in inventory_rows:
+            item = _mapping(row, "inventory row")
+            name = normalize_relative_image_path(
+                item.get("input_name", item.get("relative_path"))
+            )
+            if name in inventory_by_name:
+                raise ValueError("duplicate inventory source")
+            inventory_by_name[name] = item
     for index, (mapping, report) in enumerate(zip(mapping_rows, preflight_reports)):
         validate_preflight_report(report)
         if not candidate_is_machine_eligible(report):
@@ -1774,6 +2092,29 @@ def validate_candidate_batch(
         if report["preflight_id"] in seen_ids:
             raise ValueError("duplicate preflight_id in candidate batch")
         seen_ids.add(report["preflight_id"])
+        if resolved_input_root is not None:
+            source_name = normalize_relative_image_path(mapping["source_page"])
+            inventory = inventory_by_name.get(source_name)
+            if inventory is None:
+                raise ValueError("source inventory row missing")
+            expected_source = (resolved_input_root / Path(source_name)).resolve()
+            actual_source = Path(report["paths"]["original"]).resolve()
+            if actual_source != expected_source:
+                raise ValueError("report source does not match exact inventory input")
+            if expected_source.is_symlink():
+                raise ValueError("source inventory image must not be a symlink")
+            snapshot = _image_snapshot(
+                expected_source, "inventory source", int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+            )
+            if (
+                snapshot["sha256"] != report["hashes"]["original"]
+                or inventory.get("sha256") != snapshot["sha256"]
+                or inventory.get("width") != snapshot["size"][0]
+                or inventory.get("height") != snapshot["size"][1]
+            ):
+                raise ValueError("report source hash/dimensions do not match inventory")
+            if os.path.samefile(actual_source, Path(report["paths"]["candidate"])):
+                raise ValueError("candidate must not alias source input")
         output_name = normalize_relative_image_path(mapping["output_name"])
         candidate_path = Path(report["paths"]["candidate"]).expanduser().resolve()
         try:
