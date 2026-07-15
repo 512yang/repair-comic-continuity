@@ -29,7 +29,9 @@ Run production work only inside an isolated run root created by `scripts/prepare
 8. Release only approved tasks. Use a canary before expensive work in a cluster.
 9. Run class-specific preflight, independent page review, cluster review, and final read-only validation.
 
-Before the first production run of each Skill version, compare a blind audit with a user-reviewed golden dataset using `scripts/validate_detection_benchmark.py`. Release requires zero missed confirmed defects, zero false-positive defects, exact page coverage, and correct-page protection. A contact sheet, OCR-only result, or self-authored answer key cannot satisfy this gate.
+At startup, run `python scripts/validate_release_certificate.py --root <skill-root> --json`. A valid signed certificate proves that this exact V5 detection control plane passed its packaged user-reviewed generic benchmark, so do not ask the user to recreate the packaged generic golden dataset or fill a generic 12-page review table. Then run an automatic project canary on one complete scene cluster from the new project. The certificate never bypasses project-specific audit gates, source evidence, independent review, or final validation.
+
+Ask the user for project-specific adjudication only when the certificate invalid result persists after one clean recheck, auditor disagreement remains unresolved, a page is `evidence_blocked`, or a genuinely new failure family falls outside certified coverage. Without a valid certificate, do not generate or promote images. For a new Skill version without a signed certificate, compare a blind audit with a user-reviewed golden dataset using `scripts/validate_detection_benchmark.py`. Release requires zero missed confirmed defects, zero false-positive defects, exact page coverage, and correct-page protection. A contact sheet, OCR-only result, or self-authored answer key cannot satisfy this gate.
 
 Do not skip ahead. Audit uncertainty remains `evidence_blocked`; it is never silently treated as a correct page or a redraw instruction.
 

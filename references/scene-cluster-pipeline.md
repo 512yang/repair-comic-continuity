@@ -16,6 +16,8 @@ Use one coordinator and at most 3 workers. Tasks move through `queued`, `leased`
 
 Release expensive work only after an independently reviewed canary passes. `unchanged` and `text_only` pages do not call the image generator. A two-attempt same-family circuit breaker pauses the affected lane and requires a reviewed diagnosis before reopening.
 
+A valid signed generic release certificate removes only redundant cross-installation golden-sample labeling. Every new project still runs one automatic full-cluster canary. Escalate to the user only for unresolved independent-auditor disagreement, `evidence_blocked`, an invalid certificate, or a new uncovered failure family.
+
 ## Audit-only mode
 
 Before generation, `validate_audit.py` proves alignment, clusters, references, timelines, full-resolution audits, second reviews, and final classifications. It rejects candidates, completed repair tasks, and output images.

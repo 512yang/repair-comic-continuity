@@ -13,6 +13,10 @@ class ReleaseVersionContractTests(unittest.TestCase):
         self.assertIn('ORCHESTRATION_PIPELINE_ID = "continuity_v5_unified"', version)
         self.assertIn('EVIDENCE_PIPELINE_ID = "continuity_v4"', version)
         self.assertIn('EVIDENCE_SCHEMA_VERSION = "4.0"', version)
+        self.assertIn(
+            'RELEASE_CERTIFICATE_ID = "continuity-v5.1-signed-20260715"',
+            version,
+        )
 
         builder = (ROOT / "scripts" / "build_output_manifest.py").read_text(encoding="utf-8")
         validator = (ROOT / "scripts" / "validate_output.py").read_text(encoding="utf-8")

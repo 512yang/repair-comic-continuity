@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "pipeline_id": "continuity_v5_unified",
+  "pages": [
+    {"page": "189.jpg", "status": "passed_current_review", "visual_issue_codes": [], "text_issue_codes": []},
+    {"page": "190.jpg", "status": "passed_current_review", "visual_issue_codes": [], "text_issue_codes": []},
+    {"page": "191.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION"]},
+    {"page": "192.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION"]},
+    {"page": "193.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION"]},
+    {"page": "194.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["SOURCE_OMISSION", "TEXT_DUPLICATION", "SEMANTIC_TEXT_DRIFT", "SFX_UNCERTAIN"]},
+    {"page": "195.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION", "SEMANTIC_TEXT_DRIFT", "SOURCE_OMISSION"]},
+    {"page": "196.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["SEMANTIC_TEXT_DRIFT"]},
+    {"page": "197.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION"]},
+    {"page": "198.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["SEMANTIC_TEXT_DRIFT", "TEXT_DUPLICATION"]},
+    {"page": "199.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["SEMANTIC_TEXT_DRIFT"]},
+    {"page": "200.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["TEXT_DUPLICATION"]},
+    {"page": "201.jpg", "status": "confirmed_defect", "visual_issue_codes": [], "text_issue_codes": ["SEMANTIC_TEXT_DRIFT", "SFX_UNCERTAIN"]}
+  ]
+}

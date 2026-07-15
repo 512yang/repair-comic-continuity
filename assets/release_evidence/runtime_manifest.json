@@ -1,0 +1,71 @@
+{
+    "schema_version":  "1.0",
+    "release_id":  "continuity-v5.1-signed-20260715",
+    "scope":  "generic_detection_control_plane",
+    "files":  [
+                  {
+                      "path":  "SKILL.md",
+                      "sha256":  "fc37e2ee91c2a7cd489cea0788a2e4444808990ea8a4c1eb8ac4c270414f099c"
+                  },
+                  {
+                      "path":  "agents/openai.yaml",
+                      "sha256":  "2069bfe4e60de908bd6f3f49b03404f3c98a8dc9a71aa673cd5ca84750833903"
+                  },
+                  {
+                      "path":  "assets/release_evidence/detected_text_detection_v2.json",
+                      "sha256":  "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
+                  },
+                  {
+                      "path":  "assets/release_evidence/golden_text_detection_v2.json",
+                      "sha256":  "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
+                  },
+                  {
+                      "path":  "references/continuity-rules.md",
+                      "sha256":  "21b96fd3b58e0f1077c5a1dc59ce1f3445f4aea9a3c8d97b8ab0922297a72da7"
+                  },
+                  {
+                      "path":  "references/failure-learning.md",
+                      "sha256":  "022c888dceff35efad6d95ed6019d5ba61b99c007e03dca3149b522aef7c1328"
+                  },
+                  {
+                      "path":  "references/qa-checklist.md",
+                      "sha256":  "34a98e8200285c67ae099dcfa47722502c0834cac3ab46f32e6d2826affedc0c"
+                  },
+                  {
+                      "path":  "references/scene-cluster-pipeline.md",
+                      "sha256":  "804215dc5842025fc33888026b8e49113dfd7b0ba2dad1f6832212a75f120be8"
+                  },
+                  {
+                      "path":  "references/text-engine.md",
+                      "sha256":  "575221ed84663c85effe0e3dea067d994a696b9a01f31abe65054640d3d9439c"
+                  },
+                  {
+                      "path":  "scripts/pipeline_version.py",
+                      "sha256":  "440009a9fa6a49e937f0457c1879cee365591223a5fbb12b0ea4ad8a3e304800"
+                  },
+                  {
+                      "path":  "scripts/release_gate.py",
+                      "sha256":  "e799ae6485ce6c2fe9c1484d5a696aad8618443d64693c59eae82219b53f854f"
+                  },
+                  {
+                      "path":  "scripts/validate_appearance_matrix.py",
+                      "sha256":  "4c33debcae54fa8ea88afa3c7baa3cac7397f0d5f24331f8a8b71c8306e70c73"
+                  },
+                  {
+                      "path":  "scripts/validate_audit.py",
+                      "sha256":  "a86b3be6865b72d3f323289c5edc9834c19df2136a8dac947cbff6a34318abd8"
+                  },
+                  {
+                      "path":  "scripts/validate_detection_benchmark.py",
+                      "sha256":  "37335ff9bd6494996e5740c42b7fa31641681ad75ec8129b25c3788bb2db2ce0"
+                  },
+                  {
+                      "path":  "scripts/validate_release_certificate.py",
+                      "sha256":  "96f2b7f417428a6b6fa717a63905c67491af72d8fa1a48b741993b9ba9eda463"
+                  },
+                  {
+                      "path":  "scripts/validate_source_text_audit.py",
+                      "sha256":  "5a0c267984b197ad62f27f5856c24438ce91261a9fffe1b5ceb0bfec62e0b6df"
+                  }
+              ]
+}

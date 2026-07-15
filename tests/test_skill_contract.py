@@ -124,6 +124,20 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, skill)
 
+    def test_signed_release_certificate_skips_only_redundant_generic_review(self):
+        skill = read("SKILL.md")
+        for phrase in (
+            "scripts/validate_release_certificate.py",
+            "do not ask the user to recreate the packaged generic golden dataset",
+            "automatic project canary",
+            "certificate invalid",
+            "auditor disagreement",
+            "evidence_blocked",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+        self.assertIn("never bypasses project-specific audit gates", skill)
+
     def test_production_promotion_and_release_are_machine_gated(self):
         skill = read("SKILL.md")
         for phrase in (
