@@ -118,6 +118,9 @@ _V4_REPORT_KEYS = _REPORT_KEYS | {
     "redraw_spec",
     "redraw_request",
     "redraw_request_binding",
+    "ocr_artifact",
+    "render_manifest_artifact",
+    "glyph_board_expectation",
 }
 _REVIEW_KEYS = frozenset(
     {
@@ -142,6 +145,8 @@ _V4_REVIEW_KEYS = _REVIEW_KEYS | {
     "inspected_entities",
     "check_matrix",
     "glyph_review",
+    "findings",
+    "missing_evidence",
 }
 _METRIC_KEYS = frozenset(
     {
@@ -266,6 +271,35 @@ def _sha256_value(value: object, name: str) -> str:
     if _SHA256_RE.fullmatch(digest) is None:
         raise ValueError(f"{name} must be SHA-256")
     return digest
+
+
+def _json_artifact_snapshot(value: object, name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    source = _mapping(value, name)
+    keys = frozenset(source)
+    if keys not in (
+        frozenset({"path", "sha256"}),
+        frozenset({"path", "sha256", "content_sha256"}),
+    ):
+        raise ValueError(f"{name} fields mismatch")
+    path = _path(source["path"], f"{name}.path")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{name} read_error") from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != _sha256_value(source["sha256"], f"{name}.sha256"):
+        raise ValueError(f"{name} hash mismatch")
+    if "content_sha256" in source and digest != _sha256_value(
+        source["content_sha256"], f"{name}.content_sha256"
+    ):
+        raise ValueError(f"{name} content hash mismatch")
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{name} must be UTF-8 JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} JSON must be an object")
+    return parsed, {"path": str(path), "sha256": digest, "content_sha256": digest}
 
 
 def _canonical_bound_mapping(value: object, name: str, hash_field: str) -> dict[str, Any]:
@@ -436,8 +470,85 @@ def _crop_rgba_sha(snapshot: Mapping[str, Any], bbox: list[int]) -> str:
         return hashlib.sha256(crop.tobytes()).hexdigest()
 
 
+def _canonical_glyph_board(
+    snapshot: Mapping[str, Any], declaration: Mapping[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
+    blocks = sorted(
+        declaration["blocks"], key=lambda row: (row["reading_order"], row["block_id"])
+    )
+    crops: list[tuple[Mapping[str, Any], Image.Image]] = []
+    with Image.frombytes("RGBA", tuple(snapshot["size"]), snapshot["rgba_bytes"]) as image:
+        for block in blocks:
+            crops.append((block, image.crop(tuple(block["bbox"]))))
+    width = max(crop.width for _, crop in crops)
+    separator = 2
+    height = sum(crop.height for _, crop in crops) + separator * (len(crops) - 1)
+    board = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    layout: list[dict[str, Any]] = []
+    y = 0
+    try:
+        for block, crop in crops:
+            board.paste(crop, (0, y))
+            layout.append(
+                {
+                    "block_id": block["block_id"],
+                    "crop_bbox": block["bbox"],
+                    "board_bbox": [0, y, crop.width, y + crop.height],
+                    "crop_sha256": hashlib.sha256(crop.tobytes()).hexdigest(),
+                }
+            )
+            y += crop.height + separator
+        output = BytesIO()
+        board.save(output, format="PNG", optimize=False, compress_level=9)
+        data = output.getvalue()
+    finally:
+        board.close()
+        for _, crop in crops:
+            crop.close()
+    expectation = {
+        "candidate_sha256": snapshot["sha256"],
+        "declaration_hash": declaration["declaration_hash"],
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "width": width,
+        "height": height,
+        "separator_pixels": separator,
+        "layout": layout,
+    }
+    return data, expectation
+
+
+def write_canonical_glyph_board(
+    candidate_path: object, declaration: Mapping[str, Any], output_path: object
+) -> dict[str, Any]:
+    candidate = _path(candidate_path, "candidate_path")
+    snapshot = _image_snapshot(
+        candidate, "candidate", int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+    )
+    data, expectation = _canonical_glyph_board(snapshot, declaration)
+    output = Path(os.fspath(output_path)).expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(data)
+    return expectation
+
+
+def validate_canonical_glyph_board(
+    candidate_path: object,
+    declaration: Mapping[str, Any],
+    board_path: object,
+) -> bool:
+    candidate = _path(candidate_path, "candidate_path")
+    board = _path(board_path, "glyph board")
+    snapshot = _image_snapshot(
+        candidate, "candidate", int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+    )
+    data, _ = _canonical_glyph_board(snapshot, declaration)
+    if board.read_bytes() != data:
+        raise ValueError("glyph board does not match current candidate canonical crops")
+    return True
+
+
 def _validate_text_machine_evidence(
-    ocr_blocks: object,
+    ocr_document: object,
     render_manifest: object,
     *,
     declaration: Mapping[str, Any],
@@ -446,6 +557,32 @@ def _validate_text_machine_evidence(
     mask: Image.Image,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     blocks = declaration["blocks"]
+    ocr_source = _mapping(ocr_document, "OCR artifact")
+    _exact_keys(
+        ocr_source,
+        frozenset(
+            {
+                "candidate_sha256",
+                "declaration_hash",
+                "engine_id",
+                "engine_version",
+                "run_id",
+                "created_at",
+                "blocks",
+            }
+        ),
+        "OCR artifact",
+    )
+    if (
+        ocr_source["candidate_sha256"] != candidate_snapshot["sha256"]
+        or ocr_source["declaration_hash"] != declaration["declaration_hash"]
+    ):
+        raise ValueError("OCR artifact candidate/declaration binding mismatch")
+    _stable_id(ocr_source["engine_id"], "OCR engine_id")
+    _text(ocr_source["engine_version"], "OCR engine_version")
+    _stable_id(ocr_source["run_id"], "OCR run_id")
+    _timestamp(ocr_source["created_at"])
+    ocr_blocks = ocr_source["blocks"]
     if not isinstance(ocr_blocks, list):
         raise ValueError("OCR blocks must be a list")
     if len(ocr_blocks) != len(blocks):
@@ -453,9 +590,18 @@ def _validate_text_machine_evidence(
     normalized_ocr: list[dict[str, Any]] = []
     for expected, actual in zip(blocks, ocr_blocks):
         row = _mapping(actual, "OCR block")
-        _exact_keys(row, frozenset({"block_id", "recognized_text", "status"}), "OCR block")
-        if row["block_id"] != expected["block_id"] or row["status"] != "passed":
-            raise ValueError("OCR block coverage/status mismatch")
+        _exact_keys(
+            row,
+            frozenset({"block_id", "recognized_text", "confidence", "bbox", "crop_sha256"}),
+            "OCR block",
+        )
+        if row["block_id"] != expected["block_id"] or row["bbox"] != expected["bbox"]:
+            raise ValueError("OCR block coverage/bbox mismatch")
+        confidence = _number(row["confidence"], "OCR confidence")
+        if not 0 <= confidence <= 1:
+            raise ValueError("OCR confidence must be in [0,1]")
+        if row["crop_sha256"] != _crop_rgba_sha(candidate_snapshot, expected["bbox"]):
+            raise ValueError("OCR block crop mismatch")
         recognized = row["recognized_text"]
         if not isinstance(recognized, str) or not recognized:
             raise ValueError("OCR recognized_text must be a nonempty string")
@@ -608,6 +754,144 @@ def _normalize_evidence_artifact(
     return result
 
 
+def _normalize_panel_topology_artifact(
+    value: object,
+    *,
+    source_hash: str,
+    candidate_hash: str,
+    expected_size: list[int],
+) -> dict[str, Any]:
+    """Snapshot and validate machine-readable panel geometry evidence."""
+    source = _mapping(value, "redraw_evidence.panel_topology")
+    base_keys = frozenset(
+        {"path", "sha256", "kind", "source_page_sha256", "candidate_sha256"}
+    )
+    if frozenset(source) not in (base_keys, base_keys | {"content"}):
+        raise ValueError("redraw_evidence.panel_topology fields mismatch")
+    if source["kind"] != "panel_topology":
+        raise ValueError("panel topology artifact kind is invalid")
+    if (
+        source["source_page_sha256"] != source_hash
+        or source["candidate_sha256"] != candidate_hash
+    ):
+        raise ValueError("panel topology artifact binding mismatch")
+    path = _path(source["path"], "redraw_evidence.panel_topology.path")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("panel topology artifact read_error") from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != _sha256_value(source["sha256"], "panel topology sha256"):
+        raise ValueError("panel topology artifact hash mismatch")
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("panel topology artifact must be UTF-8 JSON") from exc
+    document = _mapping(document, "panel topology document")
+    _exact_keys(
+        document,
+        frozenset(
+            {
+                "schema_version",
+                "source_page_sha256",
+                "candidate_sha256",
+                "canvas_size",
+                "panels",
+                "relationships",
+            }
+        ),
+        "panel topology document",
+    )
+    if document["schema_version"] != "panel-topology-v1":
+        raise ValueError("panel topology schema_version is unsupported")
+    if (
+        document["source_page_sha256"] != source_hash
+        or document["candidate_sha256"] != candidate_hash
+    ):
+        raise ValueError("panel topology JSON binding mismatch")
+    canvas = _mapping(document["canvas_size"], "panel topology canvas_size")
+    _exact_keys(canvas, frozenset({"width", "height"}), "panel topology canvas_size")
+    if [canvas["width"], canvas["height"]] != expected_size:
+        raise ValueError("panel topology canvas dimensions mismatch")
+    panels = document["panels"]
+    if not isinstance(panels, list) or not panels:
+        raise ValueError("panel topology must contain panels")
+    normalized_panels: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    orders: set[int] = set()
+    for index, item in enumerate(panels):
+        row = _mapping(item, f"panel topology panels[{index}]")
+        _exact_keys(
+            row,
+            frozenset({"panel_id", "bbox", "reading_order"}),
+            f"panel topology panels[{index}]",
+        )
+        panel_id = _stable_id(row["panel_id"], f"panel topology panels[{index}].panel_id")
+        bbox = row["bbox"]
+        if (
+            not isinstance(bbox, list)
+            or len(bbox) != 4
+            or any(not isinstance(coord, int) or isinstance(coord, bool) for coord in bbox)
+            or not (0 <= bbox[0] < bbox[2] <= expected_size[0])
+            or not (0 <= bbox[1] < bbox[3] <= expected_size[1])
+        ):
+            raise ValueError("panel topology bbox is outside the canvas")
+        order = row["reading_order"]
+        if not isinstance(order, int) or isinstance(order, bool) or order < 1:
+            raise ValueError("panel topology reading_order must be a positive integer")
+        if panel_id in ids or order in orders:
+            raise ValueError("panel topology panel IDs and reading order must be unique")
+        ids.add(panel_id)
+        orders.add(order)
+        normalized_panels.append(
+            {"panel_id": panel_id, "bbox": list(bbox), "reading_order": order}
+        )
+    normalized_panels.sort(key=lambda row: row["reading_order"])
+    if [row["reading_order"] for row in normalized_panels] != list(
+        range(1, len(normalized_panels) + 1)
+    ):
+        raise ValueError("panel topology reading order must be contiguous")
+    relationships = document["relationships"]
+    if not isinstance(relationships, list):
+        raise ValueError("panel topology relationships must be a list")
+    normalized_relationships: list[dict[str, str]] = []
+    for index, item in enumerate(relationships):
+        row = _mapping(item, f"panel topology relationships[{index}]")
+        _exact_keys(
+            row,
+            frozenset({"from_panel", "to_panel", "type"}),
+            f"panel topology relationships[{index}]",
+        )
+        start = _stable_id(row["from_panel"], "panel topology relationship.from_panel")
+        end = _stable_id(row["to_panel"], "panel topology relationship.to_panel")
+        kind = _text(row["type"], "panel topology relationship.type")
+        if start not in ids or end not in ids or start == end:
+            raise ValueError("panel topology relationship references invalid panels")
+        normalized_relationships.append(
+            {"from_panel": start, "to_panel": end, "type": kind}
+        )
+    normalized_document = {
+        "schema_version": "panel-topology-v1",
+        "source_page_sha256": source_hash,
+        "candidate_sha256": candidate_hash,
+        "canvas_size": {"width": expected_size[0], "height": expected_size[1]},
+        "panels": normalized_panels,
+        "relationships": normalized_relationships,
+    }
+    if dict(document) != normalized_document:
+        raise ValueError("panel topology JSON is not canonical")
+    if "content" in source and source["content"] != normalized_document:
+        raise ValueError("panel topology embedded content does not match artifact snapshot")
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "kind": "panel_topology",
+        "source_page_sha256": source_hash,
+        "candidate_sha256": candidate_hash,
+        "content": normalized_document,
+    }
+
+
 def _normalize_redraw_evidence(
     value: object,
     *,
@@ -616,6 +900,7 @@ def _normalize_redraw_evidence(
     candidate_hash: str,
     candidate_stage: str,
     validated_request: Mapping[str, Any],
+    expected_size: list[int],
 ) -> dict[str, Any]:
     source = _mapping(value, "redraw_evidence")
     _exact_keys(
@@ -641,12 +926,11 @@ def _normalize_redraw_evidence(
         raise ValueError("redraw evidence candidate stage mismatch")
     if not isinstance(source["source_has_ordinary_text"], bool):
         raise ValueError("redraw evidence source_has_ordinary_text must be boolean")
-    topology = _normalize_evidence_artifact(
+    topology = _normalize_panel_topology_artifact(
         source["panel_topology"],
-        "redraw_evidence.panel_topology",
         source_hash=source_hash,
         candidate_hash=candidate_hash,
-        expected_kind="panel_topology",
+        expected_size=expected_size,
     )
     target = _normalize_evidence_artifact(
         source["target_composition"],
@@ -897,6 +1181,8 @@ def _compute_preflight_body(
     render_manifest: object = None,
     redraw_spec: object = None,
     redraw_request: object = None,
+    ocr_artifact: object = None,
+    render_manifest_artifact: object = None,
 ) -> dict[str, Any]:
     """Compute a normalized report body without validation recursion."""
     candidate = _path(candidate_path, "candidate_path")
@@ -1117,6 +1403,9 @@ def _compute_preflight_body(
     normalized_redraw_spec = None
     normalized_redraw_request = None
     redraw_request_binding = None
+    normalized_ocr_artifact = None
+    normalized_render_artifact = None
+    glyph_board_expectation = None
     if explicit_v4:
         normalized_stage = _text(candidate_stage, "candidate_stage")
         if normalized_stage not in {"textless", "final"}:
@@ -1149,6 +1438,14 @@ def _compute_preflight_body(
                 size=size,
             )
             normalized_declaration = normalized_text_request["declaration"]
+            if ocr_blocks is not None or render_manifest is not None:
+                raise ValueError("inline OCR/render evidence is forbidden; artifact files are required")
+            ocr_document, normalized_ocr_artifact = _json_artifact_snapshot(
+                ocr_artifact, "OCR artifact"
+            )
+            render_document, normalized_render_artifact = _json_artifact_snapshot(
+                render_manifest_artifact, "render manifest artifact"
+            )
             normalized_mask, opened_mask = _normalize_change_mask(
                 change_mask, size=size, declaration=normalized_declaration
             )
@@ -1161,12 +1458,15 @@ def _compute_preflight_body(
                     normalized_render_manifest,
                     change_evidence,
                 ) = _validate_text_machine_evidence(
-                    ocr_blocks,
-                    render_manifest,
+                    ocr_document,
+                    render_document,
                     declaration=normalized_declaration,
                     candidate_snapshot=candidate_snapshot,
                     original_snapshot=original_snapshot,
                     mask=opened_mask,
+                )
+                _, glyph_board_expectation = _canonical_glyph_board(
+                    candidate_snapshot, normalized_declaration
                 )
             finally:
                 opened_mask.close()
@@ -1214,6 +1514,7 @@ def _compute_preflight_body(
                     candidate_hash=candidate_hash,
                     candidate_stage=normalized_stage,
                     validated_request=normalized_redraw_request,
+                    expected_size=size,
                 )
                 if normalized_stage == "textless" and text_declaration is not None:
                     raise ValueError("textless redraw stage cannot carry a text declaration")
@@ -1233,6 +1534,50 @@ def _compute_preflight_body(
                         size=size,
                     )
                     normalized_declaration = normalized_text_request["declaration"]
+                    if ocr_blocks is not None or render_manifest is not None:
+                        raise ValueError(
+                            "inline OCR/render evidence is forbidden; artifact files are required"
+                        )
+                    ocr_document, normalized_ocr_artifact = _json_artifact_snapshot(
+                        ocr_artifact, "OCR artifact"
+                    )
+                    render_document, normalized_render_artifact = _json_artifact_snapshot(
+                        render_manifest_artifact, "render manifest artifact"
+                    )
+                    with Image.new("L", tuple(size), 255) as full_page_mask:
+                        (
+                            normalized_ocr_blocks,
+                            normalized_render_manifest,
+                            change_evidence,
+                        ) = _validate_text_machine_evidence(
+                            ocr_document,
+                            render_document,
+                            declaration=normalized_declaration,
+                            candidate_snapshot=candidate_snapshot,
+                            original_snapshot=original_snapshot,
+                            mask=full_page_mask,
+                        )
+                    _, glyph_board_expectation = _canonical_glyph_board(
+                        candidate_snapshot, normalized_declaration
+                    )
+                    checks["ocr_text_match"] = _check(
+                        "pass",
+                        normalized_ocr_blocks,
+                        {"exact_block_coverage": True},
+                        "OCR block text exactly matches Task 7 replacements",
+                    )
+                    checks["render_manifest_bound"] = _check(
+                        "pass",
+                        normalized_render_manifest,
+                        {"candidate_and_crop_bound": True},
+                        "render manifest matches current redraw candidate crops",
+                    )
+                    checks["inside_mask_changed"] = _check(
+                        "pass",
+                        change_evidence,
+                        {"minimum_inside_changed_pixels": 1},
+                        "redraw text blocks contain actual changed pixels",
+                    )
                 elif text_declaration is not None:
                     raise ValueError("no-text redraw cannot introduce a text declaration")
                 elif text_spec is not None or text_request is not None:
@@ -1262,6 +1607,9 @@ def _compute_preflight_body(
                 "redraw_spec": normalized_redraw_spec,
                 "redraw_request": normalized_redraw_request,
                 "redraw_request_binding": redraw_request_binding,
+                "ocr_artifact": normalized_ocr_artifact,
+                "render_manifest_artifact": normalized_render_artifact,
+                "glyph_board_expectation": glyph_board_expectation,
             }
         )
     provenance = {
@@ -1300,6 +1648,9 @@ def _compute_preflight_body(
                 "redraw_spec": normalized_redraw_spec,
                 "redraw_request": normalized_redraw_request,
                 "redraw_request_binding": redraw_request_binding,
+                "ocr_artifact": normalized_ocr_artifact,
+                "render_manifest_artifact": normalized_render_artifact,
+                "glyph_board_expectation": glyph_board_expectation,
             }
         )
     return body
@@ -1323,6 +1674,8 @@ def run_candidate_preflight(
     render_manifest: object = None,
     redraw_spec: object = None,
     redraw_request: object = None,
+    ocr_artifact: object = None,
+    render_manifest_artifact: object = None,
 ) -> dict[str, Any]:
     """Build a deterministic, fully bound machine-preflight report."""
     body = _compute_preflight_body(
@@ -1343,6 +1696,8 @@ def run_candidate_preflight(
         render_manifest=render_manifest,
         redraw_spec=redraw_spec,
         redraw_request=redraw_request,
+        ocr_artifact=ocr_artifact,
+        render_manifest_artifact=render_manifest_artifact,
     )
     return {**body, "preflight_id": _report_id(body)}
 
@@ -1397,17 +1752,25 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
         page_class = _text(source["page_class"], "page_class")
         if page_class not in PAGE_CLASSES:
             raise ValueError("page_class is invalid")
-        class_checks = {
-            "unchanged": ("content_preserved",),
-            "text_only": (
+        if page_class == "unchanged":
+            class_checks = ("content_preserved",)
+        elif page_class == "text_only":
+            class_checks = (
                 "outside_mask_preserved",
                 "text_contract_bound",
                 "ocr_text_match",
                 "render_manifest_bound",
                 "inside_mask_changed",
-            ),
-            "full_page_redraw": ("redraw_evidence",),
-        }[page_class]
+            )
+        elif source["candidate_stage"] == "final" and source["text_declaration"] is not None:
+            class_checks = (
+                "redraw_evidence",
+                "ocr_text_match",
+                "render_manifest_bound",
+                "inside_mask_changed",
+            )
+        else:
+            class_checks = ("redraw_evidence",)
     if tuple(checks) != REQUIRED_CHECKS + class_checks:
         raise ValueError("required checks are missing or out of order")
     for name in REQUIRED_CHECKS + class_checks:
@@ -1434,6 +1797,9 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
             "redraw_spec",
             "redraw_request",
             "redraw_request_binding",
+            "ocr_artifact",
+            "render_manifest_artifact",
+            "glyph_board_expectation",
         }
     _exact_keys(evaluation_inputs, expected_evaluation_keys, "evaluation_inputs")
     normalized_evaluation = {
@@ -1458,6 +1824,9 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 "redraw_spec": source["redraw_spec"],
                 "redraw_request": source["redraw_request"],
                 "redraw_request_binding": source["redraw_request_binding"],
+                "ocr_artifact": source["ocr_artifact"],
+                "render_manifest_artifact": source["render_manifest_artifact"],
+                "glyph_board_expectation": source["glyph_board_expectation"],
             }
         )
     if normalized_evaluation["text_policy"] not in TEXT_POLICIES:
@@ -1514,10 +1883,16 @@ def validate_preflight_report(report: object, *, verify_files: bool = True) -> b
                 candidate_stage=normalized_evaluation.get("candidate_stage", "final"),
                 text_spec=normalized_evaluation.get("text_spec"),
                 text_request=normalized_evaluation.get("text_request"),
-                ocr_blocks=normalized_evaluation.get("ocr_blocks"),
-                render_manifest=normalized_evaluation.get("render_manifest"),
+                # The normalized block data is an output derived from the two
+                # immutable JSON artifacts.  Revalidation must reopen those
+                # artifacts instead of feeding the derived data back through
+                # the public inline-evidence inputs.
+                ocr_blocks=None,
+                render_manifest=None,
                 redraw_spec=normalized_evaluation.get("redraw_spec"),
                 redraw_request=normalized_evaluation.get("redraw_request"),
+                ocr_artifact=normalized_evaluation.get("ocr_artifact"),
+                render_manifest_artifact=normalized_evaluation.get("render_manifest_artifact"),
             )
         except ValueError as exc:
             raise ValueError("preflight source files cannot be strongly validated") from exc
@@ -1574,8 +1949,9 @@ def _review_artifacts(
     report: Mapping[str, Any],
     created_at: str,
     reviewed_at: str,
+    require_complete: bool = True,
 ) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or (require_complete and not value):
         raise ValueError("review artifact evidence is required")
     result: list[dict[str, Any]] = []
     seen_kinds: set[str] = set()
@@ -1698,8 +2074,24 @@ def _review_artifacts(
             }
         )
     required = {"full_resolution_original", "full_resolution_candidate", "full_resolution_comparison"}
-    if not required.issubset(seen_kinds):
+    if require_complete and not required.issubset(seen_kinds):
         raise ValueError(f"review artifact missing required full-resolution kinds: {sorted(required - seen_kinds)!r}")
+    return result
+
+
+def _review_findings(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError("findings must be a list")
+    result: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for index, item in enumerate(value):
+        row = _mapping(item, f"findings[{index}]")
+        _exact_keys(row, frozenset({"code", "reason"}), f"findings[{index}]")
+        code = _stable_id(row["code"], f"findings[{index}].code")
+        if code in seen_codes:
+            raise ValueError("finding codes must be unique")
+        seen_codes.add(code)
+        result.append({"code": code, "reason": _text(row["reason"], f"findings[{index}].reason")})
     return result
 
 
@@ -1737,6 +2129,7 @@ def _glyph_review(
                 "result",
                 "rendered_blocks",
                 "regression_vocabulary",
+                "visual_checks",
             }
         ),
         "glyph review",
@@ -1762,8 +2155,8 @@ def _glyph_review(
     )
     artifact_path = _path(artifact["path"], "glyph review artifact.path")
     artifact_hash = _sha256_value(artifact["sha256"], "glyph review artifact.sha256")
-    if _sha256(artifact_path) != artifact_hash or artifact["kind"] != "full_resolution_glyph":
-        raise ValueError("glyph review artifact must be a hash-bound full-resolution image")
+    if artifact["kind"] != "canonical_glyph_board":
+        raise ValueError("glyph review artifact must be the canonical glyph board")
     if (
         artifact["source_sha256"] != report["hashes"]["original"]
         or artifact["candidate_sha256"] != report["hashes"]["candidate"]
@@ -1773,18 +2166,23 @@ def _glyph_review(
     artifact_time = _timestamp(artifact["created_at"])
     if not created_at < artifact_time <= reviewed_at:
         raise ValueError("glyph review artifact time is invalid")
-    artifact_metrics = _verified_metrics(
-        artifact_path, int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
+    expectation = _mapping(report.get("glyph_board_expectation"), "glyph board expectation")
+    artifact_snapshot = _image_snapshot(
+        artifact_path,
+        "glyph review artifact",
+        int(DEFAULT_THRESHOLDS["edge_pixel_threshold"]),
     )
-    if artifact_metrics is None or (
-        artifact_metrics["size"][0] < report["expected_size"][0]
-        or artifact_metrics["size"][1] < report["expected_size"][1]
+    if (
+        artifact_snapshot["sha256"] != artifact_hash
+        or artifact_hash != expectation.get("sha256")
+        or artifact_snapshot["size"]
+        != [expectation.get("width"), expectation.get("height")]
     ):
-        raise ValueError("glyph review artifact is not a decodable full-resolution image")
+        raise ValueError("glyph review artifact does not match current candidate canonical crops")
     normalized_artifact = {
         "path": str(artifact_path),
         "sha256": artifact_hash,
-        "kind": "full_resolution_glyph",
+        "kind": "canonical_glyph_board",
         "source_sha256": artifact["source_sha256"],
         "candidate_sha256": artifact["candidate_sha256"],
         "preflight_id": artifact["preflight_id"],
@@ -1825,12 +2223,43 @@ def _glyph_review(
         normalized_vocabulary.append({"character": character, "shape_inspected": True})
     if not {"\u5f3a", "\u9047"}.issubset(seen_chars):
         raise ValueError("glyph review regression vocabulary must include shape checks for 强 and 遇")
+    visual_checks = source["visual_checks"]
+    if not isinstance(visual_checks, list):
+        raise ValueError("glyph review visual_checks must be a list")
+    normalized_visual_checks: list[dict[str, Any]] = []
+    checked_chars: set[str] = set()
+    for index, item in enumerate(visual_checks):
+        row = _mapping(item, f"glyph review visual_checks[{index}]")
+        _exact_keys(
+            row,
+            frozenset({"character", "result", "not_ocr_only"}),
+            "glyph review visual check",
+        )
+        character = _text(row["character"], "glyph review visual check character")
+        if (
+            len(character) != 1
+            or character in checked_chars
+            or row["result"] != "passed"
+            or row["not_ocr_only"] is not True
+        ):
+            raise ValueError(
+                "glyph review visual_checks must be unique passed non-OCR-only character checks"
+            )
+        checked_chars.add(character)
+        normalized_visual_checks.append(
+            {"character": character, "result": "passed", "not_ocr_only": True}
+        )
+    if checked_chars != seen_chars:
+        raise ValueError(
+            "glyph review visual_checks must exactly cover regression_vocabulary"
+        )
     return {
         "artifact": normalized_artifact,
         "reviewer_id": reviewer_id,
         "result": "passed",
         "rendered_blocks": normalized_blocks,
         "regression_vocabulary": normalized_vocabulary,
+        "visual_checks": normalized_visual_checks,
     }
 
 
@@ -1849,6 +2278,8 @@ def record_independent_review(
     inspected_entities: object = None,
     check_matrix: object = None,
     glyph_review: object = None,
+    findings: object = None,
+    missing_evidence: object = None,
 ) -> dict[str, Any]:
     """Create a full-content-bound independent candidate review."""
     validate_preflight_report(preflight_report)
@@ -1862,6 +2293,8 @@ def record_independent_review(
             inspected_entities,
             check_matrix,
             glyph_review,
+            findings,
+            missing_evidence,
         )
     )
     author = _stable_id(generator, "generator") if strict_v4 else _text(generator, "generator")
@@ -1894,24 +2327,37 @@ def record_independent_review(
             raise ValueError("candidate must be created before review")
         if blind is not True:
             raise ValueError("independent review must be blind")
-        if not isinstance(review_artifacts, list) or not review_artifacts:
-            raise ValueError("review artifact evidence is required")
         page_class = preflight_report["page_class"]
         text_bearing = page_class == "text_only" or (
             page_class == "full_page_redraw"
             and preflight_report["candidate_stage"] == "final"
             and preflight_report["text_declaration"] is not None
         )
-        if text_bearing and glyph_review is None:
+        if outcome == "accepted" and text_bearing and glyph_review is None:
             raise ValueError("glyph review is required for text-bearing candidate")
+        if findings is None:
+            findings = []
+        if missing_evidence is None:
+            missing_evidence = []
+        normalized_findings = _review_findings(findings)
+        normalized_missing = _string_list(
+            missing_evidence, "missing_evidence", nonempty=False
+        )
+        if outcome == "accepted" and (normalized_findings or normalized_missing):
+            raise ValueError("accepted review cannot carry findings or missing evidence")
+        if outcome != "accepted" and not (normalized_findings or normalized_missing):
+            raise ValueError("rejected or pending review must persist findings or missing evidence")
+        if not isinstance(review_artifacts, list):
+            raise ValueError("review_artifacts must be a list")
         normalized_artifacts = _review_artifacts(
             review_artifacts,
             report=preflight_report,
             created_at=created_timestamp,
             reviewed_at=reviewed_timestamp,
+            require_complete=outcome == "accepted",
         )
         normalized_panels = _string_list(
-            inspected_panels, "inspected_panels", nonempty=True
+            inspected_panels, "inspected_panels", nonempty=outcome == "accepted"
         )
         normalized_entities = _string_list(
             inspected_entities, "inspected_entities", nonempty=False
@@ -1920,7 +2366,7 @@ def record_independent_review(
             check_matrix, text_bearing=text_bearing, accepted=outcome == "accepted"
         )
         normalized_glyph = None
-        if text_bearing:
+        if text_bearing and glyph_review is not None:
             normalized_glyph = _glyph_review(
                 glyph_review,
                 report=preflight_report,
@@ -1941,6 +2387,8 @@ def record_independent_review(
                 "inspected_entities": normalized_entities,
                 "check_matrix": normalized_matrix,
                 "glyph_review": normalized_glyph,
+                "findings": normalized_findings,
+                "missing_evidence": normalized_missing,
             }
         )
     return {**body, "review_id": _review_id(body)}
@@ -2005,10 +2453,15 @@ def validate_review(review: object, preflight_report: object = None) -> bool:
                 report=preflight_report,
                 created_at=created_at,
                 reviewed_at=reviewed_at,
+                require_complete=decision == "accepted",
             )
             if normalized_artifacts != source["review_artifacts"]:
                 raise ValueError("review artifacts are not canonical")
-            if _string_list(source["inspected_panels"], "inspected_panels", nonempty=True) != source["inspected_panels"]:
+            if _string_list(
+                source["inspected_panels"],
+                "inspected_panels",
+                nonempty=decision == "accepted",
+            ) != source["inspected_panels"]:
                 raise ValueError("inspected_panels are not canonical")
             if _string_list(source["inspected_entities"], "inspected_entities", nonempty=False) != source["inspected_entities"]:
                 raise ValueError("inspected_entities are not canonical")
@@ -2019,7 +2472,17 @@ def validate_review(review: object, preflight_report: object = None) -> bool:
             )
             if matrix != source["check_matrix"]:
                 raise ValueError("check_matrix is not canonical")
-            if text_bearing:
+            findings = _review_findings(source["findings"])
+            missing = _string_list(
+                source["missing_evidence"], "missing_evidence", nonempty=False
+            )
+            if findings != source["findings"] or missing != source["missing_evidence"]:
+                raise ValueError("review findings or missing evidence are not canonical")
+            if decision == "accepted" and (findings or missing):
+                raise ValueError("accepted review cannot carry findings or missing evidence")
+            if decision != "accepted" and not (findings or missing):
+                raise ValueError("rejected or pending review must persist findings or missing evidence")
+            if text_bearing and source["glyph_review"] is not None:
                 normalized_glyph = _glyph_review(
                     source["glyph_review"],
                     report=preflight_report,
@@ -2030,6 +2493,8 @@ def validate_review(review: object, preflight_report: object = None) -> bool:
                 )
                 if normalized_glyph != source["glyph_review"]:
                     raise ValueError("glyph review is not canonical")
+            elif text_bearing and decision == "accepted":
+                raise ValueError("accepted text-bearing review requires glyph review")
             elif source["glyph_review"] is not None:
                 raise ValueError("textless review cannot carry glyph review")
     body = {key: source[key] for key in source if key != "review_id"}
@@ -2068,6 +2533,12 @@ def validate_candidate_batch(
         raise ValueError("preflight_reports must be a list")
     if len(preflight_reports) != len(input_rows):
         raise ValueError("preflight report count must match input count")
+    has_v4_report = any(
+        isinstance(report, Mapping) and "page_class" in report
+        for report in preflight_reports
+    )
+    if has_v4_report and (input_root is None or inventory_rows is None):
+        raise ValueError("V4 candidate batch requires input_root and inventory rows")
     seen_ids: set[str] = set()
     resolved_input_root = None
     inventory_by_name: dict[str, Mapping[str, Any]] = {}
@@ -2097,12 +2568,17 @@ def validate_candidate_batch(
             inventory = inventory_by_name.get(source_name)
             if inventory is None:
                 raise ValueError("source inventory row missing")
-            expected_source = (resolved_input_root / Path(source_name)).resolve()
+            unresolved_source = resolved_input_root / Path(source_name)
+            if unresolved_source.is_symlink():
+                raise ValueError("source inventory image must not be a symlink")
+            expected_source = unresolved_source.resolve()
+            try:
+                expected_source.relative_to(resolved_input_root)
+            except ValueError as exc:
+                raise ValueError("source inventory image escapes input_root") from exc
             actual_source = Path(report["paths"]["original"]).resolve()
             if actual_source != expected_source:
                 raise ValueError("report source does not match exact inventory input")
-            if expected_source.is_symlink():
-                raise ValueError("source inventory image must not be a symlink")
             snapshot = _image_snapshot(
                 expected_source, "inventory source", int(DEFAULT_THRESHOLDS["edge_pixel_threshold"])
             )

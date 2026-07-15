@@ -188,11 +188,10 @@ class CandidatePreflightTests(unittest.TestCase):
                     right.close()
         return path
 
-    def make_full_redraw_report(self):
+    def make_full_redraw_report(self, *, final_text=False, include_machine=True):
         module = candidate_preflight()
-        original, candidate, _, _, _ = self.make_task7_text_candidate()
-        topology = self.root / "panel-topology.png"
-        Image.new("RGB", (256, 256), "white").save(topology)
+        original, candidate, _, text_spec, text_request = self.make_task7_text_candidate()
+        topology = self.root / "panel-topology.json"
         spec = base_v4_spec()
         page_path = "章节/0003.png"
         source_hash = sha256(original)
@@ -206,6 +205,19 @@ class CandidatePreflightTests(unittest.TestCase):
             if reference["role"] == "target_composition":
                 reference.update(path=page_path, subject=page_path, sha256=source_hash)
         redraw_request = importlib.import_module("prompt_compiler").compile_redraw_request(spec)
+        self.write_json_artifact(
+            topology,
+            {
+                "schema_version": "panel-topology-v1",
+                "source_page_sha256": source_hash,
+                "candidate_sha256": sha256(candidate),
+                "canvas_size": {"width": 256, "height": 256},
+                "panels": [
+                    {"panel_id": "panel-1", "bbox": [0, 0, 256, 256], "reading_order": 1}
+                ],
+                "relationships": [],
+            },
+        )
         request_path = self.root / "textless-request.json"
         import json
 
@@ -213,8 +225,8 @@ class CandidatePreflightTests(unittest.TestCase):
         redraw_evidence = {
             "source_page_sha256": sha256(original),
             "candidate_sha256": sha256(candidate),
-            "candidate_stage": "textless",
-            "source_has_ordinary_text": False,
+            "candidate_stage": "final" if final_text else "textless",
+            "source_has_ordinary_text": final_text,
             "panel_topology": {
                 "path": str(topology),
                 "sha256": sha256(topology),
@@ -239,14 +251,48 @@ class CandidatePreflightTests(unittest.TestCase):
             candidate,
             original,
             page_class="full_page_redraw",
-            candidate_stage="textless",
-            text_policy="textless",
+            candidate_stage="final" if final_text else "textless",
+            text_policy="deterministic_text" if final_text else "textless",
             ocr_metadata=VALID_OCR,
             redraw_evidence=redraw_evidence,
             redraw_spec=spec,
             redraw_request=redraw_request,
+            text_spec=text_spec if final_text else None,
+            text_request=text_request if final_text else None,
+            **(
+                self.task7_machine_kwargs(candidate, text_request)
+                if final_text and include_machine
+                else {}
+            ),
         )
         return original, candidate, report
+
+    def test_full_redraw_topology_must_be_structured_json(self):
+        module = candidate_preflight()
+        original, candidate, _, _, _ = self.make_task7_text_candidate()
+        topology = self.root / "fake-topology.png"
+        Image.new("RGB", (256, 256), "white").save(topology)
+        with self.assertRaisesRegex(ValueError, "topology|JSON"):
+            module._normalize_panel_topology_artifact(
+                {
+                    "path": str(topology),
+                    "sha256": sha256(topology),
+                    "kind": "panel_topology",
+                    "source_page_sha256": sha256(original),
+                    "candidate_sha256": sha256(candidate),
+                },
+                source_hash=sha256(original),
+                candidate_hash=sha256(candidate),
+                expected_size=[256, 256],
+            )
+
+    def test_full_redraw_final_text_requires_same_machine_text_gate(self):
+        with self.assertRaisesRegex(ValueError, "OCR artifact|artifact"):
+            self.make_full_redraw_report(final_text=True, include_machine=False)
+        _, _, report = self.make_full_redraw_report(final_text=True)
+        self.assertEqual(report["checks"]["ocr_text_match"]["status"], "pass")
+        self.assertEqual(report["checks"]["render_manifest_bound"]["status"], "pass")
+        self.assertIsNotNone(report["glyph_board_expectation"])
 
     def task7_machine_evidence(self, candidate, request):
         declaration = request["declaration"]
@@ -263,7 +309,9 @@ class CandidatePreflightTests(unittest.TestCase):
                         {
                             "block_id": block["block_id"],
                             "recognized_text": replacement,
-                            "status": "passed",
+                            "confidence": 0.99,
+                            "bbox": bbox,
+                            "crop_sha256": crop_hash,
                         }
                     )
                     rendered_blocks.append(
@@ -277,22 +325,108 @@ class CandidatePreflightTests(unittest.TestCase):
                             "crop_sha256": crop_hash,
                         }
                     )
-        return ocr_blocks, {
+        return {
+            "candidate_sha256": sha256(candidate),
+            "declaration_hash": request["declaration_hash"],
+            "engine_id": "ocr-engine-1",
+            "engine_version": "1.0.0",
+            "run_id": "ocr-run-001",
+            "created_at": "2026-07-14T19:10:00+00:00",
+            "blocks": ocr_blocks,
+        }, {
             "candidate_sha256": sha256(candidate),
             "declaration_hash": request["declaration_hash"],
             "blocks": rendered_blocks,
         }
 
     def task7_machine_kwargs(self, candidate, request):
+        ocr_document, render_manifest = self.task7_machine_evidence(candidate, request)
+        stem = Path(candidate).stem
+        return {
+            "ocr_artifact": self.write_json_artifact(
+                self.root / f"{stem}-ocr.json", ocr_document
+            ),
+            "render_manifest_artifact": self.write_json_artifact(
+                self.root / f"{stem}-render.json", render_manifest
+            ),
+        }
+
+    def write_json_artifact(self, path, payload):
+        import json
+
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return {"path": str(path), "sha256": sha256(path)}
+
+    def test_inline_ocr_is_rejected_and_snapshot_json_artifacts_are_required(self):
+        module = candidate_preflight()
+        original, candidate, mask, spec, request = self.make_task7_text_candidate()
         ocr_blocks, render_manifest = self.task7_machine_evidence(candidate, request)
-        return {"ocr_blocks": ocr_blocks, "render_manifest": render_manifest}
+        with self.assertRaisesRegex(ValueError, "artifact|inline"):
+            module.run_candidate_preflight(
+                candidate,
+                original,
+                page_class="text_only",
+                text_policy="deterministic_text",
+                change_mask=mask,
+                text_spec=spec,
+                text_request=request,
+                ocr_blocks=ocr_blocks,
+                render_manifest=render_manifest,
+            )
+
+    def test_canonical_glyph_board_is_built_from_current_candidate_crops(self):
+        module = candidate_preflight()
+        _, candidate, _, _, request = self.make_task7_text_candidate()
+        with self.assertRaisesRegex(ValueError, "glyph|candidate"):
+            module.validate_canonical_glyph_board(
+                candidate,
+                request["declaration"],
+                self.root / "white-glyph.png",
+            )
+
+    def test_v4_batch_requires_source_inventory_binding_even_when_paths_look_valid(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(
+            self.candidate, self.original, page_class="unchanged"
+        )
+        with self.assertRaisesRegex(ValueError, "input_root|inventory"):
+            module.validate_candidate_batch(
+                ["candidate.jpg"],
+                [{"source_page": "candidate.jpg", "output_name": "candidate.jpg"}],
+                [report],
+                candidate_root=self.root,
+                actual_outputs=["candidate.jpg"],
+            )
+
+    def test_rejected_review_persists_missing_evidence_and_stays_ineligible(self):
+        module = candidate_preflight()
+        report = module.run_candidate_preflight(
+            self.candidate, self.original, page_class="unchanged"
+        )
+        review = module.record_independent_review(
+            report,
+            "worker-1",
+            "reviewer-2",
+            "rejected",
+            "2026-07-14T20:00:00+00:00",
+            candidate_created_at="2026-07-14T19:00:00+00:00",
+            review_artifacts=[],
+            blind=True,
+            inspected_panels=[],
+            inspected_entities=[],
+            check_matrix={name: False for name in module.REVIEW_MATRIX_CHECKS},
+            findings=[{"code": "glyph_failed", "reason": "candidate crop mismatch"}],
+            missing_evidence=["glyph_review"],
+        )
+        self.assertEqual(review["decision"], "rejected")
+        self.assertFalse(module.candidate_is_finally_eligible(report, review))
 
     def test_text_machine_gate_rejects_ocr_and_render_crop_mismatch(self):
         module = candidate_preflight()
         original, candidate, mask, spec, request = self.make_task7_text_candidate(rgba=True)
         ocr_blocks, render_manifest = self.task7_machine_evidence(candidate, request)
         bad_ocr = copy.deepcopy(ocr_blocks)
-        bad_ocr[0]["recognized_text"] = "错字"
+        bad_ocr["blocks"][0]["recognized_text"] = "错字"
         with self.assertRaisesRegex(ValueError, "OCR|ocr"):
             module.run_candidate_preflight(
                 candidate,
@@ -302,8 +436,10 @@ class CandidatePreflightTests(unittest.TestCase):
                 change_mask=mask,
                 text_spec=spec,
                 text_request=request,
-                ocr_blocks=bad_ocr,
-                render_manifest=render_manifest,
+                ocr_artifact=self.write_json_artifact(self.root / "bad-ocr.json", bad_ocr),
+                render_manifest_artifact=self.write_json_artifact(
+                    self.root / "valid-render.json", render_manifest
+                ),
             )
         bad_render = copy.deepcopy(render_manifest)
         bad_render["blocks"][0]["crop_sha256"] = "f" * 64
@@ -316,15 +452,18 @@ class CandidatePreflightTests(unittest.TestCase):
                 change_mask=mask,
                 text_spec=spec,
                 text_request=request,
-                ocr_blocks=ocr_blocks,
-                render_manifest=bad_render,
+                ocr_artifact=self.write_json_artifact(
+                    self.root / "valid-ocr.json", ocr_blocks
+                ),
+                render_manifest_artifact=self.write_json_artifact(
+                    self.root / "bad-render.json", bad_render
+                ),
             )
 
     def test_samefile_hardlink_and_unmodified_text_candidate_are_rejected(self):
         module = candidate_preflight()
         original, candidate, mask, spec, request = self.make_task7_text_candidate()
-        ocr_blocks, _ = self.task7_machine_evidence(original, request)
-        _, unmodified_manifest = self.task7_machine_evidence(original, request)
+        ocr_blocks, unmodified_manifest = self.task7_machine_evidence(original, request)
         for name, path in (("same", original), ("hardlink", self.root / "hardlink.png")):
             if name == "hardlink":
                 os.link(original, path)
@@ -338,8 +477,12 @@ class CandidatePreflightTests(unittest.TestCase):
                         change_mask=mask,
                         text_spec=spec,
                         text_request=request,
-                        ocr_blocks=ocr_blocks,
-                        render_manifest=unmodified_manifest,
+                        ocr_artifact=self.write_json_artifact(
+                            self.root / f"{name}-ocr.json", ocr_blocks
+                        ),
+                        render_manifest_artifact=self.write_json_artifact(
+                            self.root / f"{name}-render.json", unmodified_manifest
+                        ),
                     )
 
     def test_animated_image_and_one_character_stable_id_are_rejected(self):
@@ -419,9 +562,11 @@ class CandidatePreflightTests(unittest.TestCase):
             board.paste(right.convert("RGB"), (256, 0))
             board.save(comparison)
         glyph_board = self.root / "task7-glyph.png"
-        Image.new("RGB", (256, 256), "white").save(glyph_board)
+        module.write_canonical_glyph_board(
+            candidate, request["declaration"], glyph_board
+        )
         glyph_artifact = self.review_artifact(
-            glyph_board, report, "full_resolution_glyph"
+            glyph_board, report, "canonical_glyph_board"
         )
         review = module.record_independent_review(
             report,
@@ -447,6 +592,10 @@ class CandidatePreflightTests(unittest.TestCase):
                 "regression_vocabulary": [
                     {"character": "\u5f3a", "shape_inspected": True},
                     {"character": "\u9047", "shape_inspected": True},
+                ],
+                "visual_checks": [
+                    {"character": "\u5f3a", "result": "passed", "not_ocr_only": True},
+                    {"character": "\u9047", "result": "passed", "not_ocr_only": True},
                 ],
             },
         )
