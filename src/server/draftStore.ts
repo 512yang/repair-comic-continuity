@@ -1,3 +1,4 @@
+import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { readAtomicJson, writeAtomicJson } from "./atomicJson";
@@ -42,6 +43,30 @@ export function loadDraft<T>(
     throw new Error("Stored draft identity does not match the requested page and phase.");
   }
   return stored.value;
+}
+
+export function listDrafts<T>(
+  projectRoot: string,
+  phase: DraftPhase,
+): Array<StoredDraft<T>> {
+  const directory = join(
+    resolve(projectRoot),
+    ".comic-review-workbench",
+    "drafts",
+    phase,
+  );
+  if (!existsSync(directory)) {
+    return [];
+  }
+  const collator = new Intl.Collator("zh-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+  return readdirSync(directory)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readAtomicJson<StoredDraft<T>>(join(directory, name)))
+    .filter((draft) => draft.phase === phase)
+    .sort((left, right) => collator.compare(left.page, right.page));
 }
 
 function draftPath(

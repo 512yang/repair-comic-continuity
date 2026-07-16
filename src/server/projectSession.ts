@@ -71,17 +71,12 @@ export function createProjectSession(
   writeAtomicJson(inventoryPath, inventory);
 
   if (existsSync(sessionPath)) {
+    const existing = openProjectSession(root);
     const stored = readAtomicJson<StoredSession>(sessionPath);
-    if (stored.project_root !== root) {
-      throw new Error("Stored session belongs to a different project root.");
-    }
-    if (stored.inventory_sha256 !== inventorySha) {
-      throw new Error("Project inventory hash drift requires a new or reconciled session.");
-    }
     if (stored.mode_locked_at && stored.mode !== mode) {
       throw new Error(`Project mode is already locked to ${stored.mode}.`);
     }
-    return new ProjectSession(sessionPath, stored, inventory);
+    return existing;
   }
 
   const now = new Date().toISOString();
@@ -98,6 +93,24 @@ export function createProjectSession(
   };
   writeAtomicJson(sessionPath, state);
   return new ProjectSession(sessionPath, state, inventory);
+}
+
+export function openProjectSession(projectRoot: string): ProjectSession {
+  const root = resolve(projectRoot);
+  const stateRoot = join(root, ".comic-review-workbench");
+  const sessionPath = join(stateRoot, "session.json");
+  if (!existsSync(sessionPath)) {
+    throw new Error("Workbench session does not exist for this project.");
+  }
+  const stored = readAtomicJson<StoredSession>(sessionPath);
+  const inventory = inventoryProject(root);
+  if (stored.project_root !== root) {
+    throw new Error("Stored session belongs to a different project root.");
+  }
+  if (stored.inventory_sha256 !== hashInventory(inventory)) {
+    throw new Error("Project inventory hash drift requires a new or reconciled session.");
+  }
+  return new ProjectSession(sessionPath, stored, inventory);
 }
 
 function hashInventory(inventory: ProjectInventory): string {
