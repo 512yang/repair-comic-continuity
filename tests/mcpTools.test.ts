@@ -96,14 +96,44 @@ describe("workbench MCP tools", () => {
 
   it("persists output decisions and returns evidence-backed status", async () => {
     const root = makeProject();
+    writeFileSync(join(root, "输出", "0001.jpg"), "candidate-one");
     const readStatus = vi.fn(async () => ({ blockers: [], pendingHumanReview: 1 }));
     const service = createWorkbenchToolService({ readStatus });
+    await service.callTool("open_comic_review_workbench", {
+      projectRoot: root,
+      mode: "automatic",
+    });
+    await service.callTool("submit_review_drafts", {
+      projectRoot: root,
+      phase: "input_review",
+    });
     const decision = await service.callTool("record_output_page_decision", {
       projectRoot: root,
       page: "0001.jpg",
-      decision: { state: "passed", candidateSha256: "a".repeat(64) },
+      decision: { state: "passed" },
     });
-    expect(decision.ok).toBe(true);
+    expect(decision).toMatchObject({
+      ok: true,
+      data: { status: "saved", reviewState: "locked" },
+    });
+    const reopened = await service.callTool("open_comic_review_workbench", {
+      projectRoot: root,
+      mode: "automatic",
+    });
+    expect(reopened).toMatchObject({
+      ok: true,
+      data: { phase: "output_review", pages: [{ reviewState: "locked" }] },
+    });
+
+    writeFileSync(join(root, "输出", "0001.jpg"), "candidate-two");
+    const changed = await service.callTool("open_comic_review_workbench", {
+      projectRoot: root,
+      mode: "automatic",
+    });
+    expect(changed).toMatchObject({
+      ok: true,
+      data: { pages: [{ reviewState: "unreviewed" }] },
+    });
     const status = await service.callTool("get_comic_review_status", {
       projectRoot: root,
     });

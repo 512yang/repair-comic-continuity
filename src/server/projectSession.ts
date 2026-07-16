@@ -76,7 +76,7 @@ export class ProjectSession {
       ...this.state,
       mode,
       mode_locked_at: now,
-      phase: mode === "automatic" ? "processing" : "input_review",
+      phase: "processing",
       updated_at: now,
     };
     writeAtomicJson(this.sessionPath, this.state);

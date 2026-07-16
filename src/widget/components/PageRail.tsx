@@ -4,6 +4,7 @@ export interface WorkbenchPage {
   path: string;
   sourceUrl: string;
   outputUrl?: string;
+  reviewState?: PageReviewState;
 }
 
 interface PageRailProps {

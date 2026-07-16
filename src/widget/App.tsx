@@ -8,8 +8,8 @@ import type {
   SubmitAction,
 } from "../shared/contracts";
 import { deriveSubmitAction } from "../shared/stateMachine";
-import { AnnotationPanel } from "./components/AnnotationPanel";
 import { AnnotationCanvas } from "./components/AnnotationCanvas";
+import { AnnotationPanel } from "./components/AnnotationPanel";
 import { PageRail, type WorkbenchPage } from "./components/PageRail";
 import { ProjectStart } from "./components/ProjectStart";
 import { SubmitBar } from "./components/SubmitBar";
@@ -34,18 +34,35 @@ export function App({ initialState, api }: AppProps) {
   const [mode, setMode] = useState<ReviewMode | undefined>(initialState.mode);
   const [phase, setPhase] = useState<RunPhase>(initialState.phase);
   const [running, setRunning] = useState(false);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [states, setStates] = useState<Record<string, PageReviewState>>({});
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    const firstOpen = initialState.pages.findIndex(
+      (page) => page.reviewState !== "locked",
+    );
+    return firstOpen < 0 ? 0 : firstOpen;
+  });
+  const [states, setStates] = useState<Record<string, PageReviewState>>(() =>
+    Object.fromEntries(
+      initialState.pages
+        .filter((page) => page.reviewState)
+        .map((page) => [page.path, page.reviewState!]),
+    ),
+  );
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const [shapes, setShapes] = useState<Record<string, NormalizedAnnotationShape[]>>({});
+  const [shapes, setShapes] = useState<
+    Record<string, NormalizedAnnotationShape[]>
+  >({});
+  const [showSource, setShowSource] = useState(false);
   const reviewed = Object.values(states).filter((state) =>
-    ["correct", "annotated", "passed", "needs_revision", "locked"].includes(state),
+    ["correct", "annotated", "passed", "needs_revision", "locked"].includes(
+      state,
+    ),
   ).length;
   const unreviewed = Math.max(0, initialState.pages.length - reviewed);
+  const requiresEveryPage =
+    phase === "output_review" ||
+    (mode === "human_visual_auto_text" && phase === "input_review");
   const blockers =
-    mode === "human_visual_auto_text" && phase === "input_review" && unreviewed
-      ? [`${unreviewed} pages unreviewed`]
-      : [];
+    requiresEveryPage && unreviewed ? [`${unreviewed} pages unreviewed`] : [];
   const dirty = mode !== undefined;
   const submitAction: SubmitAction = useMemo(() => {
     try {
@@ -55,6 +72,7 @@ export function App({ initialState, api }: AppProps) {
     }
   }, [blockers, dirty, phase, running]);
   const page = initialState.pages[currentIndex];
+  const pageState = page ? states[page.path] ?? "unreviewed" : "unreviewed";
 
   if (!mode || phase === "project_setup") {
     return (
@@ -77,32 +95,59 @@ export function App({ initialState, api }: AppProps) {
     );
   }
 
-  const markCorrect = async (): Promise<void> => {
-    if (!page) return;
-    const next = { ...states, [page.path]: "correct" as const };
-    setStates(next);
-    await api.callTool("save_review_draft", {
-      projectRoot: initialState.projectRoot,
-      phase: "input_review",
-      page: page.path,
-      draft: { state: "correct", note: "", shapes: [] },
-    });
+  const advance = (): void => {
     setCurrentIndex(Math.min(currentIndex + 1, initialState.pages.length - 1));
   };
 
-  const markIssue = async (): Promise<void> => {
+  const markCorrect = async (): Promise<void> => {
     if (!page) return;
+    const nextState: PageReviewState =
+      phase === "output_review" ? "locked" : "correct";
+    setStates({ ...states, [page.path]: nextState });
+    if (phase === "output_review") {
+      await api.callTool("record_output_page_decision", {
+        projectRoot: initialState.projectRoot,
+        page: page.path,
+        decision: { state: "passed", note: "", shapes: [] },
+      });
+    } else {
+      await api.callTool("save_review_draft", {
+        projectRoot: initialState.projectRoot,
+        phase: "input_review",
+        page: page.path,
+        draft: { state: "correct", note: "", shapes: [] },
+      });
+    }
+    advance();
+  };
+
+  const markIssue = async (): Promise<void> => {
+    if (!page || pageState === "locked") return;
     const pageNote = notes[page.path]?.trim() ?? "";
     const pageShapes = shapes[page.path] ?? [];
     if (!pageNote && pageShapes.length === 0) return;
-    setStates({ ...states, [page.path]: "annotated" });
-    await api.callTool("save_review_draft", {
-      projectRoot: initialState.projectRoot,
-      phase: "input_review",
-      page: page.path,
-      draft: { state: "annotated", note: pageNote, shapes: pageShapes },
-    });
-    setCurrentIndex(Math.min(currentIndex + 1, initialState.pages.length - 1));
+    const nextState: PageReviewState =
+      phase === "output_review" ? "needs_revision" : "annotated";
+    setStates({ ...states, [page.path]: nextState });
+    if (phase === "output_review") {
+      await api.callTool("record_output_page_decision", {
+        projectRoot: initialState.projectRoot,
+        page: page.path,
+        decision: {
+          state: "needs_revision",
+          note: pageNote,
+          shapes: pageShapes,
+        },
+      });
+    } else {
+      await api.callTool("save_review_draft", {
+        projectRoot: initialState.projectRoot,
+        phase: "input_review",
+        page: page.path,
+        draft: { state: "annotated", note: pageNote, shapes: pageShapes },
+      });
+    }
+    advance();
   };
 
   const submit = async (): Promise<void> => {
@@ -130,16 +175,40 @@ export function App({ initialState, api }: AppProps) {
       />
       <section className="canvas-column">
         <header className="canvas-toolbar">
-          <strong>{mode === "automatic" ? "全自动模式" : "人工审查模式"}</strong>
-          <span>适应窗口 · 100% · 放大</span>
+          <strong>
+            {phase === "output_review"
+              ? "输出复核"
+              : mode === "automatic"
+                ? "全自动模式"
+                : "人工审查模式"}
+          </strong>
+          {phase === "output_review" ? (
+            <span className="compare-switch">
+              <button type="button" onClick={() => setShowSource(true)}>
+                看原图
+              </button>
+              <button type="button" onClick={() => setShowSource(false)}>
+                看输出
+              </button>
+            </span>
+          ) : (
+            <span>适应窗口 · 100% · 放大</span>
+          )}
         </header>
         <div className="canvas-placeholder">
           {page ? (
             <AnnotationCanvas
               page={page.path}
-              sourceUrl={page.sourceUrl}
+              sourceUrl={
+                phase === "output_review" && !showSource
+                  ? (page.outputUrl ?? page.sourceUrl)
+                  : page.sourceUrl
+              }
               shapes={shapes[page.path] ?? []}
-              onShapesChange={(next) => setShapes({ ...shapes, [page.path]: next })}
+              onShapesChange={(next) =>
+                setShapes({ ...shapes, [page.path]: next })
+              }
+              disabled={pageState === "locked"}
             />
           ) : (
             <p>没有页面</p>
@@ -151,15 +220,22 @@ export function App({ initialState, api }: AppProps) {
           page={page.path}
           note={notes[page.path] ?? ""}
           onNoteChange={(note) => setNotes({ ...notes, [page.path]: note })}
+          readOnly={pageState === "locked"}
         />
       ) : null}
       <SubmitBar
         submitAction={submitAction}
         reviewed={reviewed}
         total={initialState.pages.length}
-        showCorrect={mode === "human_visual_auto_text"}
+        showCorrect={
+          phase === "output_review" || mode === "human_visual_auto_text"
+        }
+        outputReview={phase === "output_review"}
         canMarkIssue={Boolean(
-          page && ((notes[page.path]?.trim().length ?? 0) > 0 || (shapes[page.path]?.length ?? 0) > 0),
+          page &&
+            pageState !== "locked" &&
+            ((notes[page.path]?.trim().length ?? 0) > 0 ||
+              (shapes[page.path]?.length ?? 0) > 0),
         )}
         onCorrect={() => void markCorrect()}
         onMarkIssue={() => void markIssue()}

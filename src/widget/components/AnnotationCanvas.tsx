@@ -9,6 +9,7 @@ interface AnnotationCanvasProps {
   sourceUrl: string;
   shapes: NormalizedAnnotationShape[];
   onShapesChange: (shapes: NormalizedAnnotationShape[]) => void;
+  disabled?: boolean;
 }
 
 interface ActiveStroke {
@@ -21,6 +22,7 @@ export function AnnotationCanvas({
   sourceUrl,
   shapes,
   onShapesChange,
+  disabled = false,
 }: AnnotationCanvasProps) {
   const [tool, setTool] = useState<DrawTool>("rectangle");
   const [active, setActive] = useState<ActiveStroke | null>(null);
@@ -51,6 +53,7 @@ export function AnnotationCanvas({
       <div className="draw-toolbar" aria-label="圈画工具">
         <button
           type="button"
+          disabled={disabled}
           className={tool === "rectangle" ? "active" : ""}
           onClick={() => setTool("rectangle")}
         >
@@ -58,6 +61,7 @@ export function AnnotationCanvas({
         </button>
         <button
           type="button"
+          disabled={disabled}
           className={tool === "freehand" ? "active" : ""}
           onClick={() => setTool("freehand")}
         >
@@ -65,6 +69,7 @@ export function AnnotationCanvas({
         </button>
         <button
           type="button"
+          disabled={disabled}
           onClick={() =>
             onShapesChange([
               ...shapes,
@@ -74,7 +79,11 @@ export function AnnotationCanvas({
         >
           整页
         </button>
-        <button type="button" onClick={() => onShapesChange(shapes.slice(0, -1))}>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onShapesChange(shapes.slice(0, -1))}
+        >
           撤销
         </button>
       </div>
@@ -86,10 +95,12 @@ export function AnnotationCanvas({
           viewBox="0 0 1 1"
           preserveAspectRatio="none"
           onPointerDown={(event) => {
+            if (disabled) return;
             event.currentTarget.setPointerCapture?.(event.pointerId);
             setActive({ tool, points: [pointFromEvent(event)] });
           }}
           onPointerMove={(event) => {
+            if (disabled) return;
             if (!active) return;
             const point = pointFromEvent(event);
             setActive({
@@ -101,6 +112,7 @@ export function AnnotationCanvas({
             });
           }}
           onPointerUp={(event) => {
+            if (disabled) return;
             if (!active) return;
             const point = pointFromEvent(event);
             const stroke = {

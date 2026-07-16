@@ -5,6 +5,7 @@ import {
   openProjectSession,
 } from "./projectSession";
 import type { ReviewMode } from "../shared/contracts";
+import { inspectOutputReview, recordOutputDecision } from "./outputReview";
 
 export const TOOL_NAMES = [
   "open_comic_review_workbench",
@@ -53,6 +54,8 @@ export function createWorkbenchToolService(
       const projectRoot = requiredString(input.projectRoot, "projectRoot");
       const mode = reviewMode(input.mode);
       const session = createProjectSession(projectRoot, mode);
+      const output = inspectOutputReview(session.projectRoot, session.inventory.pages);
+      const phase = session.modeLockedAt && output.ready ? "output_review" : session.phase;
       dependencies.onSessionOpened?.({
         sessionId: session.sessionId,
         projectRoot: session.projectRoot,
@@ -64,12 +67,18 @@ export function createWorkbenchToolService(
         projectRoot: session.projectRoot,
         mode: session.mode,
         modeLockedAt: session.modeLockedAt,
-        phase: session.phase,
+        phase,
         inventory: session.inventory,
+        outputReview: {
+          ready: output.ready,
+          missingPages: output.missingPages,
+          unexpectedPages: output.unexpectedPages,
+        },
         pages: session.inventory.pages.map((page, index) => ({
           path: page.path,
           sourceUri: `comic-page://${session.sessionId}/input/${index}`,
           outputUri: `comic-page://${session.sessionId}/output/${index}`,
+          reviewState: output.pages[index]?.reviewState ?? "unreviewed",
         })),
       };
     },
@@ -101,6 +110,18 @@ export function createWorkbenchToolService(
           .filter((page) => !reviewed.has(page));
         if (missing.length > 0) {
           throw new Error(`${missing.length} input pages are still unreviewed`);
+        }
+      }
+      if (phase === "output_review") {
+        const output = inspectOutputReview(projectRoot, session.inventory.pages);
+        if (!output.ready) {
+          throw new Error("Output names/count do not exactly match the sealed input inventory.");
+        }
+        const missing = output.pages.filter(
+          (page) => page.reviewState !== "locked" && page.reviewState !== "needs_revision",
+        );
+        if (missing.length > 0) {
+          throw new Error(`${missing.length} output pages are still unreviewed`);
         }
       }
       session.lockMode(session.mode);
@@ -144,8 +165,17 @@ export function createWorkbenchToolService(
       if (!("decision" in input)) {
         throw new Error("decision is required");
       }
-      saveDraft(projectRoot, "output_review", page, input.decision);
-      return { status: "saved", page, phase: "output_review" };
+      const session = openProjectSession(projectRoot);
+      if (!session.modeLockedAt) {
+        throw new Error("Output review cannot begin before the processing mode is submitted.");
+      }
+      const recorded = recordOutputDecision(
+        projectRoot,
+        session.inventory.pages,
+        page,
+        input.decision,
+      );
+      return { status: "saved", page, phase: "output_review", ...recorded };
     },
   };
 

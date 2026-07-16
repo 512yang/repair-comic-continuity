@@ -1,10 +1,11 @@
-import type { ReviewMode, RunPhase } from "../shared/contracts";
+import type { PageReviewState, ReviewMode, RunPhase } from "../shared/contracts";
 import type { WorkbenchInitialState } from "./App";
 
 interface OpenPageDescriptor {
   path: string;
   sourceUri: string;
   outputUri?: string;
+  reviewState?: PageReviewState;
 }
 
 export async function buildInitialStateFromToolResult(
@@ -32,6 +33,7 @@ export async function buildInitialStateFromToolResult(
         phase === "output_review" && page.outputUri
           ? await readImage(page.outputUri)
           : undefined,
+      ...(page.reviewState ? { reviewState: page.reviewState } : {}),
     })),
   );
   return { projectRoot, phase, mode, pages };
@@ -43,7 +45,22 @@ function pageDescriptor(value: unknown): OpenPageDescriptor | null {
   const path = nonemptyString(page.path);
   const sourceUri = nonemptyString(page.sourceUri);
   const outputUri = nonemptyString(page.outputUri) ?? undefined;
-  return path && sourceUri ? { path, sourceUri, outputUri } : null;
+  const reviewState = pageReviewState(page.reviewState) ?? undefined;
+  return path && sourceUri ? { path, sourceUri, outputUri, reviewState } : null;
+}
+
+function pageReviewState(value: unknown): PageReviewState | null {
+  return [
+    "unreviewed",
+    "correct",
+    "annotated",
+    "processing",
+    "passed",
+    "needs_revision",
+    "locked",
+  ].includes(String(value))
+    ? (value as PageReviewState)
+    : null;
 }
 
 function runPhase(value: unknown): RunPhase | null {

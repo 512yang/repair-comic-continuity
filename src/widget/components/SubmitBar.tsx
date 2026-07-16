@@ -5,6 +5,7 @@ interface SubmitBarProps {
   reviewed: number;
   total: number;
   showCorrect: boolean;
+  outputReview: boolean;
   canMarkIssue: boolean;
   onCorrect: () => void;
   onMarkIssue: () => void;
@@ -16,6 +17,7 @@ export function SubmitBar({
   reviewed,
   total,
   showCorrect,
+  outputReview,
   canMarkIssue,
   onCorrect,
   onMarkIssue,
@@ -29,7 +31,7 @@ export function SubmitBar({
         {showCorrect ? (
           <>
             <button type="button" className="secondary" onClick={onCorrect}>
-              正确并下一页
+              {outputReview ? "通过并下一页" : "正确并下一页"}
             </button>
             <button
               type="button"
@@ -37,7 +39,7 @@ export function SubmitBar({
               onClick={onMarkIssue}
               disabled={!canMarkIssue}
             >
-              有问题并下一页
+              {outputReview ? "需二修并下一页" : "有问题并下一页"}
             </button>
           </>
         ) : null}

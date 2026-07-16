@@ -73,4 +73,43 @@ describe("comic review app shell", () => {
       },
     });
   });
+
+  it("requires every output page once and keeps an unchanged passed page locked", async () => {
+    const api = { callTool: vi.fn(async () => ({ ok: true })) };
+    render(
+      <App
+        api={api}
+        initialState={{
+          projectRoot: "D:/demo",
+          phase: "output_review",
+          mode: "automatic",
+          pages: [
+            {
+              path: "0001.jpg",
+              sourceUrl: "data:image/jpeg;base64,source1",
+              outputUrl: "data:image/jpeg;base64,output1",
+              reviewState: "locked",
+            },
+            {
+              path: "0002.jpg",
+              sourceUrl: "data:image/jpeg;base64,source2",
+              outputUrl: "data:image/jpeg;base64,output2",
+              reviewState: "unreviewed",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("1 / 2 页已审")).toBeVisible();
+    expect(screen.getByRole("button", { name: "提交给 Codex" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "通过并下一页" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "通过并下一页" }));
+    expect(api.callTool).toHaveBeenCalledWith("record_output_page_decision", {
+      projectRoot: "D:/demo",
+      page: "0002.jpg",
+      decision: { state: "passed", note: "", shapes: [] },
+    });
+    expect(screen.getByRole("button", { name: "提交给 Codex" })).toBeEnabled();
+  });
 });
