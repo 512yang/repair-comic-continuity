@@ -45,4 +45,32 @@ describe("comic review app shell", () => {
     });
     expect(screen.getByText("Codex 正在处理")).toBeVisible();
   });
+
+  it("saves a problem note and unlocks submit only after every page is reviewed", async () => {
+    const api = { callTool: vi.fn(async () => ({ ok: true })) };
+    render(<App initialState={humanProject} api={api} />);
+    await userEvent.click(screen.getByRole("button", { name: "人工审查" }));
+
+    const issue = screen.getByRole("button", { name: "有问题并下一页" });
+    expect(issue).toBeDisabled();
+    await userEvent.type(
+      screen.getByLabelText("哪里不对，应该怎么改？"),
+      "肤色和上一页不一致",
+    );
+    expect(issue).toBeEnabled();
+    await userEvent.click(issue);
+    await userEvent.click(screen.getByRole("button", { name: "正确并下一页" }));
+
+    expect(screen.getByRole("button", { name: "提交给 Codex" })).toBeEnabled();
+    expect(api.callTool).toHaveBeenCalledWith("save_review_draft", {
+      projectRoot: "D:/demo",
+      phase: "input_review",
+      page: "0001.jpg",
+      draft: {
+        state: "annotated",
+        note: "肤色和上一页不一致",
+        shapes: [],
+      },
+    });
+  });
 });

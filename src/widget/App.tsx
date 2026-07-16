@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import type {
+  NormalizedAnnotationShape,
   PageReviewState,
   ReviewMode,
   RunPhase,
@@ -8,6 +9,7 @@ import type {
 } from "../shared/contracts";
 import { deriveSubmitAction } from "../shared/stateMachine";
 import { AnnotationPanel } from "./components/AnnotationPanel";
+import { AnnotationCanvas } from "./components/AnnotationCanvas";
 import { PageRail, type WorkbenchPage } from "./components/PageRail";
 import { ProjectStart } from "./components/ProjectStart";
 import { SubmitBar } from "./components/SubmitBar";
@@ -35,6 +37,7 @@ export function App({ initialState, api }: AppProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [states, setStates] = useState<Record<string, PageReviewState>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [shapes, setShapes] = useState<Record<string, NormalizedAnnotationShape[]>>({});
   const reviewed = Object.values(states).filter((state) =>
     ["correct", "annotated", "passed", "needs_revision", "locked"].includes(state),
   ).length;
@@ -87,6 +90,21 @@ export function App({ initialState, api }: AppProps) {
     setCurrentIndex(Math.min(currentIndex + 1, initialState.pages.length - 1));
   };
 
+  const markIssue = async (): Promise<void> => {
+    if (!page) return;
+    const pageNote = notes[page.path]?.trim() ?? "";
+    const pageShapes = shapes[page.path] ?? [];
+    if (!pageNote && pageShapes.length === 0) return;
+    setStates({ ...states, [page.path]: "annotated" });
+    await api.callTool("save_review_draft", {
+      projectRoot: initialState.projectRoot,
+      phase: "input_review",
+      page: page.path,
+      draft: { state: "annotated", note: pageNote, shapes: pageShapes },
+    });
+    setCurrentIndex(Math.min(currentIndex + 1, initialState.pages.length - 1));
+  };
+
   const submit = async (): Promise<void> => {
     if (!mode || submitAction.startsWith("disabled_")) return;
     setRunning(true);
@@ -116,7 +134,16 @@ export function App({ initialState, api }: AppProps) {
           <span>适应窗口 · 100% · 放大</span>
         </header>
         <div className="canvas-placeholder">
-          {page ? <img src={page.sourceUrl} alt={page.path} /> : <p>没有页面</p>}
+          {page ? (
+            <AnnotationCanvas
+              page={page.path}
+              sourceUrl={page.sourceUrl}
+              shapes={shapes[page.path] ?? []}
+              onShapesChange={(next) => setShapes({ ...shapes, [page.path]: next })}
+            />
+          ) : (
+            <p>没有页面</p>
+          )}
         </div>
       </section>
       {page ? (
@@ -131,7 +158,11 @@ export function App({ initialState, api }: AppProps) {
         reviewed={reviewed}
         total={initialState.pages.length}
         showCorrect={mode === "human_visual_auto_text"}
+        canMarkIssue={Boolean(
+          page && ((notes[page.path]?.trim().length ?? 0) > 0 || (shapes[page.path]?.length ?? 0) > 0),
+        )}
         onCorrect={() => void markCorrect()}
+        onMarkIssue={() => void markIssue()}
         onSubmit={() => void submit()}
       />
     </main>

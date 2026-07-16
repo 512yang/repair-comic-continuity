@@ -39,6 +39,15 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .canvas-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid #d0c5b8; color: #6d645b; background: #f7f3ed; font-size: 13px; }
 .canvas-placeholder { overflow: auto; display: grid; place-items: start center; padding: 26px; background-color: #d8d1c7; background-image: linear-gradient(45deg, rgba(255,255,255,.25) 25%, transparent 25%), linear-gradient(-45deg, rgba(255,255,255,.25) 25%, transparent 25%); background-size: 24px 24px; }
 .canvas-placeholder img { display: block; max-width: 100%; height: auto; box-shadow: 0 18px 40px rgba(41, 32, 22, .18); }
+.annotation-canvas { display: grid; gap: 10px; width: min(100%, 920px); }
+.draw-toolbar { display: flex; gap: 6px; justify-self: center; padding: 6px; border: 1px solid #cabdad; border-radius: 10px; background: #fffaf2; box-shadow: 0 5px 16px rgba(56, 42, 27, .08); }
+.draw-toolbar button { padding: 6px 10px; border: 1px solid transparent; border-radius: 7px; color: #5d5348; background: transparent; font-size: 12px; }
+.draw-toolbar button.active { color: white; border-color: #79401f; background: #8d4d28; }
+.image-stage { position: relative; justify-self: center; max-width: 100%; line-height: 0; }
+.image-stage img { width: auto; max-width: 100%; }
+.annotation-overlay { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+.annotation-mark { vector-effect: non-scaling-stroke; stroke: #e83f2f; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.annotation-mark.preview { opacity: .65; stroke-dasharray: 7 5; }
 .annotation-panel { overflow: auto; padding: 20px; border-left: 1px solid #d5ccc0; background: #fffdf9; }
 .annotation-panel h2 { overflow: hidden; margin: 0 0 24px; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .annotation-panel label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 700; }
@@ -50,6 +59,7 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .submit-actions { display: flex; gap: 10px; }
 .submit-actions button { min-width: 144px; padding: 12px 18px; border-radius: 10px; font-weight: 700; }
 .submit-actions .secondary { border: 1px solid #b8aa9a; color: #4e453b; background: #fff; }
+.submit-actions .issue { border-color: #bf7762; color: #8d3927; }
 .submit-actions .primary { border: 1px solid #743b1f; color: white; background: #8d4d28; }
 .processing-state { display: grid; place-items: center; align-content: center; min-height: 520px; text-align: center; }
 .processing-dot { width: 12px; height: 12px; border-radius: 50%; background: #9b5430; box-shadow: 0 0 0 8px rgba(155,84,48,.12); animation: pulse 1.4s infinite; }
