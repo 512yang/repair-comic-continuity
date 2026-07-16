@@ -7,6 +7,8 @@ import { TOOL_NAMES } from "../src/server/tools";
 
 let client: Client | undefined;
 let projectRoot: string | undefined;
+const serverRoot = process.env.PACKAGED_PLUGIN_ROOT ?? process.cwd();
+const serverEntry = join(serverRoot, "dist", "mcp", "server.cjs");
 
 afterEach(async () => {
   await client?.close();
@@ -20,8 +22,8 @@ describe("built MCP server", () => {
     client = new Client({ name: "workbench-test-client", version: "1.0.0" });
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: ["dist/mcp/server.cjs", "--stdio"],
-      cwd: process.cwd(),
+      args: [serverEntry, "--stdio"],
+      cwd: serverRoot,
       stderr: "pipe",
     });
     await client.connect(transport);
@@ -52,8 +54,8 @@ describe("built MCP server", () => {
     await client.connect(
       new StdioClientTransport({
         command: process.execPath,
-        args: ["dist/mcp/server.cjs", "--stdio"],
-        cwd: process.cwd(),
+        args: [serverEntry, "--stdio"],
+        cwd: serverRoot,
         stderr: "pipe",
       }),
     );
