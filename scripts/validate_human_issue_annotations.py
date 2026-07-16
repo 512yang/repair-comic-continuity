@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from closed_loop_controller import TRAIT_CODES
 from failure_learning import FAILURE_CODES
 
 
@@ -32,11 +33,13 @@ ANNOTATION_KEYS = frozenset(
         "regions",
         "targets",
         "defect_codes",
+        "trait_codes",
         "observed_state",
         "required_state",
         "instruction",
     }
 )
+REQUIRED_ANNOTATION_KEYS = ANNOTATION_KEYS - {"trait_codes"}
 PAGE_KEYS = frozenset({"path", "sha256"})
 REGION_KEYS = frozenset({"region_id", "bbox_norm", "description"})
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
@@ -136,7 +139,11 @@ def validate_human_issue_annotations(
 
     for index, row in enumerate(rows):
         field = f"annotations[{index}]"
-        if not isinstance(row, dict) or set(row) != ANNOTATION_KEYS:
+        if (
+            not isinstance(row, dict)
+            or not REQUIRED_ANNOTATION_KEYS.issubset(row)
+            or not set(row).issubset(ANNOTATION_KEYS)
+        ):
             raise ValueError(f"{field} must contain exact keys")
         annotation_id = _text(row.get("annotation_id"), f"{field}.annotation_id")
         if annotation_id in seen_annotations:
@@ -202,6 +209,20 @@ def validate_human_issue_annotations(
                 raise ValueError(f"unknown defect code: {normalized_code}")
             normalized_codes.append(normalized_code)
 
+        traits = row.get("trait_codes", [])
+        if not isinstance(traits, list):
+            raise ValueError(f"{field}.trait_codes must be a list")
+        normalized_traits = [
+            _text(trait, f"{field}.trait_codes") for trait in traits
+        ]
+        if len(set(normalized_traits)) != len(normalized_traits):
+            raise ValueError(f"duplicate trait code in {annotation_id}")
+        unknown_traits = [
+            trait for trait in normalized_traits if trait not in TRAIT_CODES
+        ]
+        if unknown_traits:
+            raise ValueError(f"unknown trait code: {unknown_traits[0]}")
+
         normalized_rows.append(
             {
                 "annotation_id": annotation_id,
@@ -209,6 +230,7 @@ def validate_human_issue_annotations(
                 "regions": normalized_regions,
                 "targets": normalized_targets,
                 "defect_codes": sorted(set(normalized_codes)),
+                "trait_codes": sorted(normalized_traits),
                 "observed_state": _text(
                     row.get("observed_state"), f"{field}.observed_state"
                 ),

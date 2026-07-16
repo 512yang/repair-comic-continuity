@@ -14,7 +14,7 @@ class ReleaseVersionContractTests(unittest.TestCase):
         self.assertIn('EVIDENCE_PIPELINE_ID = "continuity_v4"', version)
         self.assertIn('EVIDENCE_SCHEMA_VERSION = "4.0"', version)
         self.assertIn(
-            'RELEASE_CERTIFICATE_ID = "continuity-v5.4-signed-20260716"',
+            'RELEASE_CERTIFICATE_ID = "continuity-v5.5-signed-20260716"',
             version,
         )
 
@@ -31,6 +31,14 @@ class ReleaseVersionContractTests(unittest.TestCase):
         )
         self.assertIn(
             '"scripts/human_issue_learning.py"',
+            certificate_validator,
+        )
+        self.assertIn(
+            '"scripts/closed_loop_controller.py"',
+            certificate_validator,
+        )
+        self.assertIn(
+            '"scripts/prompt_compiler.py"',
             certificate_validator,
         )
 

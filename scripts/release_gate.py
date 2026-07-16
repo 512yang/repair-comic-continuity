@@ -13,6 +13,11 @@ from candidate_preflight import (
     validate_preflight_report,
     validate_review,
 )
+from closed_loop_controller import (
+    build_annotation_binding,
+    validate_annotation_binding,
+    validate_annotation_review,
+)
 from pipeline_contracts import normalize_relative_image_path
 from project_common import (
     discover_project,
@@ -23,6 +28,8 @@ from project_common import (
 from validate_appearance_matrix import validate_matrix
 from validate_output import validate_project
 from validate_source_text_audit import validate_source_text_audit
+from validate_human_issue_annotations import validate_human_issue_annotations
+from validate_human_visual_selection import validate_human_visual_selection
 
 
 SCHEMA_VERSION = "1.1"
@@ -115,6 +122,44 @@ def _validate_matrix_files(
             )
 
 
+def validate_annotation_release_binding(
+    *,
+    expected_binding: Mapping[str, Any],
+    annotation_review: Mapping[str, Any],
+    preflight: Mapping[str, Any],
+    main_review: Mapping[str, Any],
+    candidate_sha256: str,
+) -> bool:
+    """Prove that an annotated repair stayed bound through prompt and review."""
+    expected = validate_annotation_binding(expected_binding)
+    redraw_request = preflight.get("redraw_request")
+    declaration = (
+        redraw_request.get("declaration")
+        if isinstance(redraw_request, Mapping)
+        else None
+    )
+    actual = (
+        declaration.get("human_issue_binding")
+        if isinstance(declaration, Mapping)
+        else None
+    )
+    if actual is None:
+        raise ValueError("prompt request is missing the human issue binding")
+    if validate_annotation_binding(actual) != expected:
+        raise ValueError("prompt request human issue binding mismatch")
+    reviewed = validate_annotation_review(annotation_review, binding=expected)
+    if reviewed["candidate_sha256"] != candidate_sha256:
+        raise ValueError("annotation review candidate hash mismatch")
+    if reviewed["preflight_id"] != preflight.get("preflight_id"):
+        raise ValueError("annotation review preflight binding mismatch")
+    if (
+        reviewed["generator"] != main_review.get("generator")
+        or reviewed["reviewer"] != main_review.get("reviewer")
+    ):
+        raise ValueError("annotation review actor binding mismatch")
+    return True
+
+
 def _sealed_inputs(
     manifest: Mapping[str, Any], input_names: list[str], input_hashes: dict[str, str]
 ) -> dict[str, str] | None:
@@ -186,6 +231,40 @@ def validate_release_project(
     input_hashes = {
         name: sha256_file(page) for name, page in zip(input_names, input_pages)
     }
+    expected_annotation_bindings: dict[str, dict[str, Any]] = {}
+    try:
+        evidence_root = Path(evidence_dir).resolve()
+        evidence_root.relative_to(project.root.resolve())
+        annotation_manifest_path = evidence_root / "human_issue_annotations.json"
+        if annotation_manifest_path.is_file():
+            selection_path = evidence_root / "human_visual_selection.json"
+            if not selection_path.is_file():
+                raise ValueError("human visual selection is missing")
+            selection = validate_human_visual_selection(
+                _load_json(selection_path), project.input_dir, input_names
+            )
+            annotation_document = _load_json(annotation_manifest_path)
+            annotations = validate_human_issue_annotations(
+                annotation_document,
+                project.input_dir,
+                input_names,
+                selection["selected_pages"],
+            )
+            manifest_relative = annotation_manifest_path.relative_to(
+                project.root
+            ).as_posix()
+            manifest_hash = sha256_file(annotation_manifest_path)
+            for page_name in annotations["annotated_pages"]:
+                expected_annotation_bindings[page_name] = build_annotation_binding(
+                    annotation_document,
+                    page_path=page_name,
+                    source_sha256=input_hashes[page_name],
+                    manifest_path=manifest_relative,
+                    manifest_sha256=manifest_hash,
+                )
+    except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError):
+        _add(errors, "ANNOTATION_MANIFEST_INVALID")
+        evidence_root = Path(evidence_dir).resolve()
     actual_outputs = _output_names(project.output_dir)
     counts.update(
         input=len(input_names), output=len(actual_outputs), pages=len(manifest.get("pages", []))
@@ -326,6 +405,7 @@ def validate_release_project(
                 _add(errors, "PREFLIGHT_INVALID")
                 preflight = None
 
+        review = None
         review_binding = _bound_file(
             project.root,
             row.get("review"),
@@ -344,6 +424,38 @@ def validate_release_project(
                 _add(errors, "REVIEW_INVALID")
         elif review_binding is not None:
             _add(errors, "REVIEW_INVALID")
+
+        expected_annotation = expected_annotation_bindings.get(name)
+        actual_annotation = None
+        if preflight is not None:
+            redraw_request = preflight.get("redraw_request")
+            declaration = (
+                redraw_request.get("declaration")
+                if isinstance(redraw_request, Mapping)
+                else None
+            )
+            if isinstance(declaration, Mapping):
+                actual_annotation = declaration.get("human_issue_binding")
+        if expected_annotation is not None:
+            try:
+                if preflight is None or review is None or candidate_hash is None:
+                    raise ValueError("annotated page release evidence is incomplete")
+                annotation_review_path = (
+                    evidence_root / "annotation_reviews" / Path(name + ".json")
+                )
+                if not annotation_review_path.is_file():
+                    raise ValueError("annotation review artifact is missing")
+                validate_annotation_release_binding(
+                    expected_binding=expected_annotation,
+                    annotation_review=_load_json(annotation_review_path),
+                    preflight=preflight,
+                    main_review=review,
+                    candidate_sha256=candidate_hash,
+                )
+            except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError):
+                _add(errors, "ANNOTATION_RELEASE_BINDING_INVALID")
+        elif actual_annotation is not None:
+            _add(errors, "ANNOTATION_RELEASE_BINDING_INVALID")
 
     if seen_pages != input_names or len(set(seen_pages)) != len(seen_pages):
         _add(errors, "PAGE_BINDING_INVALID")

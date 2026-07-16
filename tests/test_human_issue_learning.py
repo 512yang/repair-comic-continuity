@@ -37,6 +37,7 @@ class HumanIssueLearningTests(unittest.TestCase):
                 }],
                 "targets": ["character:hero", "prop:crown"],
                 "defect_codes": ["identity_drift"],
+                "trait_codes": ["facial_hair", "headwear"],
                 "observed_state": "beard and crown are inconsistent",
                 "required_state": "match the identity reference",
                 "instruction": "change only the annotated details",
@@ -76,6 +77,7 @@ class HumanIssueLearningTests(unittest.TestCase):
             )
             self.assertIn("user-reviewer", failure["diagnosis"])
             self.assertIn("lower-face=[0.25,0.1,0.6,0.48]", failure["diagnosis"])
+            self.assertIn("traits=facial_hair,headwear", failure["diagnosis"])
             self.assertIn("match the identity reference", failure["corrective_action"])
             self.assertIn("change only the annotated details", failure["corrective_action"])
         with self.assertRaisesRegex(ValueError, "effective complete before/after evidence"):

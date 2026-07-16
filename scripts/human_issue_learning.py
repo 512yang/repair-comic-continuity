@@ -60,9 +60,11 @@ def ingest_human_issue_annotations(
     for annotation in validated["annotations"]:
         page = annotation["page"]
         regions = _region_summary(annotation["regions"])
+        traits = ",".join(annotation.get("trait_codes", [])) or "unspecified"
         diagnosis = (
             f"user_confirmed_by={validated['confirmed_by']}; "
-            f"observed_state={annotation['observed_state']}; regions={regions}"
+            f"observed_state={annotation['observed_state']}; "
+            f"traits={traits}; regions={regions}"
         )
         corrective_action = (
             f"required_correction={annotation['required_state']}; "

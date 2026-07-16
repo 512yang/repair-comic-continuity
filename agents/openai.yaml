@@ -1,4 +1,4 @@
 interface:
-  display_name: "漫画连续性修复 V5"
-  short_description: "依据小说、人设图和前后页，先审核再修复漫画画面、文字与跨页连续性。"
-  default_prompt: "使用 $repair-comic-continuity 按 continuity_v5_unified 流程先审核再修复当前漫画项目，保持输入输出名称完全一致。"
+  display_name: "漫画连续性修复 V5.5"
+  short_description: "依据小说、人设图、前后页和人工标注，先审核再修复漫画画面、文字与跨页连续性。"
+  default_prompt: "使用 $repair-comic-continuity 按 continuity_v5_unified 闭环流程先审核再修复当前漫画项目，保持输入输出名称完全一致。"

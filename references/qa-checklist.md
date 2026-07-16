@@ -7,6 +7,8 @@
 - Validate `character_appearance_matrix.json`; require exact cluster-page coverage and full-resolution, reference-bound checks for skin tone, hair, facial hair, clothing, face shape, and body build for every named character.
 - Require two independent full-resolution audits and resolve any routed second review.
 - Treat contact sheets as orientation only.
+- Save the V5.5 run preview and verify input count equals expected output count, every page has a class, every input page retains the all-page text policy, and only confirmed `full_page_redraw` pages consume generation calls.
+- When human annotations exist, require the controller's `annotations_ingested` receipt and a hash-current `human_issue_binding` in every annotated redraw request.
 
 ## Candidate review
 
@@ -16,6 +18,7 @@
 - Preserve panel geometry, composition, people, skin, hair, facial hair, clothing, props, recurring extras, scene axis, line work, color, texture, and detail density.
 - Compare each candidate against the confirmed appearance matrix and reject any same-character skin-tone category jump, including a drift attributed only to vague water, shadow, or mood lighting.
 - Reject self-review, stale artifacts, missing hashes, seams, unintended balloons, extra text, and reference contamination.
+- For an annotated candidate, review every annotation ID and require both `required_state_met=true` and `unaffected_content_preserved=true`; save the independent result under `evidence/annotation_reviews`.
 
 ## Text review
 
@@ -35,4 +38,5 @@
 - Confirm the exact relative-path set, including original filename case and extension, equals the input set.
 - Confirm input and output counts both equal `N`, all tasks are completed, all registries are passed, and unresolved issues equal zero.
 - Confirm failure-learning promotions have positive regression, clean control, variation, and independent review evidence.
+- Confirm the closed-loop stage receipts are complete and ordered, all learned rules came from `load_effective_rules_for_page`, and no unresolved conflicting effective rules remain.
 - Run read-only validation and reject any mismatch between files, hashes, registries, events, and `FINAL_QA_REPORT.md`.

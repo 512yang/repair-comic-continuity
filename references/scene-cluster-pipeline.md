@@ -70,6 +70,7 @@ When the user identifies what is wrong and where to change it, keep `human_visua
       ],
       "targets": ["character:邓正虎"],
       "defect_codes": ["identity_drift"],
+      "trait_codes": ["facial_hair"],
       "observed_state": "beard is missing",
       "required_state": "restore the identity-reference beard",
       "instruction": "change only the beard and related facial detail"
@@ -83,6 +84,14 @@ When the user identifies what is wrong and where to change it, keep `human_visua
 Use normalized `[left, top, right, bottom]` boxes within `[0, 1]`; use `[0, 0, 1, 1]` only when the user explicitly marks the whole page. Resolve verbal locations into boxes, but do not invent the observed state or required correction. Annotation pages must be selected, input-relative, naturally ordered, unique, and hash-current.
 
 Every annotated page must add exactly one `human_issue_annotation` audit record whose `user_confirmed_issue_annotations` artifact binds the annotation manifest path and SHA-256. A missing or stale binding blocks classification. The audit must still contain the selected page's full-resolution continuity record; the annotation does not prove that the proposed correction is visually safe.
+
+### Closed-loop task binding
+
+Run `scripts/closed_loop_controller.py` after audit and before task release. Save a run preview that exactly covers all input pages and shows visual selection, page class, all-page text policy, annotation IDs, selected learned rules, blockers, expected output count, and generation-call count.
+
+When annotations exist, the stage chain must include `annotations_ingested` before `tasks_released`. Build one `human_issue_binding` per annotated page and place it inside the complete redraw request. After candidate review, store the independent annotation result at `evidence/annotation_reviews/<input-relative-name>.json`. Each annotation must prove its required state and preserve all unaffected content; missing or failed checks block promotion.
+
+Use `load_effective_rules_for_page` to load only reviewed rules from the durable store. Apply `page > cluster > project > skill_candidate` precedence and stop on conflicting effective rules at the same scope. Never resolve a rule conflict by silently choosing the newest rule.
 
 ## Promote candidates
 

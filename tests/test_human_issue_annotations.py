@@ -69,6 +69,7 @@ class HumanIssueAnnotationTests(unittest.TestCase):
 
     def test_accepts_hash_bound_regions_and_normalizes_learning_evidence(self):
         document = self.manifest()
+        document["annotations"][0]["trait_codes"] = ["facial_hair", "skin_tone"]
         document["annotations"][0]["regions"].append({
             "region_id": "chin",
             "bbox_norm": [0.30, 0.32, 0.55, 0.52],
@@ -81,6 +82,21 @@ class HumanIssueAnnotationTests(unittest.TestCase):
         self.assertEqual(result["annotated_pages"], ["2.jpg"])
         self.assertEqual(result["confirmed_at"], "2026-07-16T02:00:00+00:00")
         self.assertEqual(result["annotations"][0]["defect_codes"], ["identity_drift"])
+        self.assertEqual(
+            result["annotations"][0]["trait_codes"],
+            ["facial_hair", "skin_tone"],
+        )
+
+    def test_rejects_unknown_or_duplicate_trait_codes(self):
+        unknown = self.manifest()
+        unknown["annotations"][0]["trait_codes"] = ["beard_magic"]
+        with self.assertRaisesRegex(ValueError, "unknown trait code"):
+            self.validate(unknown)
+
+        duplicate = self.manifest()
+        duplicate["annotations"][0]["trait_codes"] = ["facial_hair", "facial_hair"]
+        with self.assertRaisesRegex(ValueError, "duplicate trait code"):
+            self.validate(duplicate)
 
     def test_rejects_empty_annotations_and_schema_or_policy_drift(self):
         empty = self.manifest([])

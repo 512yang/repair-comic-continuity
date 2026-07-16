@@ -217,6 +217,28 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, documents)
 
+    def test_v55_closed_loop_cannot_skip_annotation_prompt_review_or_learning(self):
+        documents = "\n".join(
+            (
+                read("SKILL.md"),
+                read("references/scene-cluster-pipeline.md"),
+                read("references/failure-learning.md"),
+                read("references/qa-checklist.md"),
+            )
+        )
+        for phrase in (
+            "closed_loop_controller.py",
+            "human_issue_binding",
+            "annotation_reviews",
+            "annotations_ingested",
+            "load_effective_rules_for_page",
+            "conflicting effective rules",
+            "run preview",
+            "preserve all unaffected content",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
 
 if __name__ == "__main__":
     unittest.main()

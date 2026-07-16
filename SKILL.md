@@ -47,6 +47,16 @@ When the user supplies the visual-problem page numbers or names, use `human_visu
 
 If the user also identifies what is wrong and where to change it, write every user-confirmed region, observed state, required correction, affected target, and instruction to `evidence/human_issue_annotations.json`. Validate it with `scripts/validate_human_issue_annotations.py`, bind it to the selected page's audit by path and SHA-256, and ingest it transactionally with `scripts/human_issue_learning.py`. An annotation never becomes an effective learned rule by itself; it starts only as observed failure evidence.
 
+## V5.5 closed-loop enforcement
+
+Use `scripts/closed_loop_controller.py` for every production run that contains human annotations or learned rules. Build and save a run preview before task release; it must list every input page, page class, text policy, selected visual page, annotation ID, effective rule ID, blocker, expected output count, and estimated generation-call count.
+
+Advance the controller only through `workspace_prepared`, `inventory_sealed`, `audit_passed`, `annotations_ingested`, `tasks_released`, `candidate_reviewed`, `learning_recorded`, `outputs_promoted`, and `release_passed`. When annotations exist, a missing `annotations_ingested` receipt blocks task release. Do not replace a missing receipt with prose, a file-existence claim, or an agent assertion.
+
+For every annotated redraw, build a hash-bound `human_issue_binding` and include it in the complete redraw request. The generator must repair every bound required state and preserve all unaffected content. After generation, write an independent per-annotation review to `evidence/annotation_reviews/<input-relative-name>.json`; every annotation must pass both `required_state_met` and `unaffected_content_preserved`. `scripts/release_gate.py` rejects an annotated page when the prompt binding, candidate hash, preflight ID, reviewer identity, or annotation review is missing or stale.
+
+Load promoted rules through `load_effective_rules_for_page`; do not manually copy selected rules into a prompt. Resolve specificity as `page > cluster > project > skill_candidate`. Block conflicting effective rules at the same scope. Persist annotation intake and after-candidate outcomes atomically before advancing the matching controller receipt.
+
 Promote learned corrections only after positive regression, clean control, variation, and independent review pass with hash-bound artifacts. Follow `page -> cluster -> project -> skill_candidate` without skipping scope. A candidate becomes permanent across installations only through a reviewed Skill change and fresh signed release.
 
 See [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) for the exact manifest and audit-record contracts.

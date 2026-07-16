@@ -3,7 +3,7 @@
 ORCHESTRATION_PIPELINE_ID = "continuity_v5_unified"
 EVIDENCE_PIPELINE_ID = "continuity_v4"
 EVIDENCE_SCHEMA_VERSION = "4.0"
-RELEASE_CERTIFICATE_ID = "continuity-v5.4-signed-20260716"
+RELEASE_CERTIFICATE_ID = "continuity-v5.5-signed-20260716"
 
 
 def version_contract() -> dict[str, str]:
