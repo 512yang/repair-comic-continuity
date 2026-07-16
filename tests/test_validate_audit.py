@@ -209,6 +209,60 @@ class AuditOnlyValidationTests(unittest.TestCase):
             },
         )
 
+    def write_human_annotations(self):
+        path = self.evidence / "human_issue_annotations.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "status": "confirmed",
+                    "mode": "human_visual_auto_text",
+                    "confirmed_by": "user",
+                    "confirmed_at": "2026-07-16T10:00:00+08:00",
+                    "annotations": [{
+                        "annotation_id": "189-beard",
+                        "page": {
+                            "path": "189.jpg",
+                            "sha256": self.artifact(
+                                self.root / "输入" / "189.jpg"
+                            )["sha256"],
+                        },
+                        "regions": [{
+                            "region_id": "lower-face",
+                            "bbox_norm": [0.25, 0.10, 0.60, 0.48],
+                            "description": "lower face and beard",
+                        }],
+                        "targets": ["character:hero"],
+                        "defect_codes": ["identity_drift"],
+                        "observed_state": "beard is missing",
+                        "required_state": "restore reference beard",
+                        "instruction": "change only the annotated detail",
+                    }],
+                    "learning_policy": "evidence_gated",
+                    "persistence_policy": "page_cluster_project_skill_candidate",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def append_human_annotation_audit(self, artifact_override=None):
+        annotations = self.evidence / "human_issue_annotations.json"
+        path = self.evidence / "page_audit.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        artifact = {
+            "kind": "user_confirmed_issue_annotations",
+            **self.artifact(annotations),
+        }
+        if artifact_override:
+            artifact.update(artifact_override)
+        document["pages"][0]["audits"].append({
+            "perspective": "human_issue_annotation",
+            "artifact": artifact,
+        })
+        write_registry(path, document)
+
     def test_audit_only_accepts_complete_audits_without_candidates(self):
         before = self.tree_bytes()
         result = validate_audit_project(self.root, self.evidence)
@@ -283,6 +337,29 @@ class AuditOnlyValidationTests(unittest.TestCase):
         (self.evidence / "source_text_audit" / "189.jpg.json").unlink()
 
         with self.assertRaisesRegex(ValueError, "source text audit"):
+            validate_audit_project(self.root, self.evidence)
+
+    def test_human_annotations_require_hash_bound_page_audit_and_report_counts(self):
+        self.write_human_selection(["189.jpg"])
+        self.write_human_annotations()
+        with self.assertRaisesRegex(ValueError, "human issue annotation audit"):
+            validate_audit_project(self.root, self.evidence)
+
+        self.append_human_annotation_audit()
+        result = validate_audit_project(self.root, self.evidence)
+        self.assertEqual(result["human_issue_annotation_count"], 1)
+        self.assertEqual(result["human_issue_annotated_page_count"], 1)
+
+    def test_human_annotation_audit_rejects_stale_manifest_binding(self):
+        self.write_human_selection(["189.jpg"])
+        self.write_human_annotations()
+        self.append_human_annotation_audit({"sha256": "0" * 64})
+        with self.assertRaisesRegex(ValueError, "annotation artifact mismatch"):
+            validate_audit_project(self.root, self.evidence)
+
+    def test_human_annotations_require_human_visual_selection_mode(self):
+        self.write_human_annotations()
+        with self.assertRaisesRegex(ValueError, "requires human visual selection"):
             validate_audit_project(self.root, self.evidence)
 
 

@@ -14,3 +14,11 @@ A rule is not effective merely because one retry looked better. Promotion requir
 4. independent review by an actor other than the generator.
 
 Promote through page, cluster, project, and skill-candidate scope without skipping levels. Preserve version history, source evidence, supersession, revocation, and dependent-rule rollback. A revoked or rejected rule cannot enter prompts. Rejected candidates never become reference images.
+
+## Human annotation intake
+
+Validate `human_issue_annotations.json` before learning intake. Bind each user-confirmed region, affected target, observed state, required correction, source page hash, prompt/reference hash, reviewer, timestamp, and scene cluster. Ingest each `(annotation, target)` pair transactionally through `scripts/human_issue_learning.py`; if any pair fails, leave the durable failure store unchanged.
+
+An annotation never becomes an effective learned rule by itself. It creates only an observed failure. After repair, bind a different after-candidate hash and an independent outcome review. Then require positive regression, clean control, variation, and independent review before promotion.
+
+Promote only through `page -> cluster -> project -> skill_candidate`. Do not use a page rule on another page, a cluster rule in another cluster, or a project rule in another project. A `skill_candidate` remains non-permanent until a reviewer updates the Skill, runs the full regression suite, issues a fresh signed release, and preserves the source evidence. Revoke failed rules and dependent rules without deleting their audit history.

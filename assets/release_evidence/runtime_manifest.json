@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "release_id": "continuity-v5.3-signed-20260716",
+  "release_id": "continuity-v5.4-signed-20260716",
   "scope": "generic_detection_control_plane",
   "files": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "references/failure-learning.md",
-      "sha256": "022c888dceff35efad6d95ed6019d5ba61b99c007e03dca3149b522aef7c1328"
+      "sha256": "c6102979b355b98d0e0035a57a6903b5a852d2bfb635f01ebe54228ffc9f9cc5"
     },
     {
       "path": "references/qa-checklist.md",
@@ -29,15 +29,19 @@
     },
     {
       "path": "references/scene-cluster-pipeline.md",
-      "sha256": "57e33a39e13512bdf46c368013bcc9a7663971f223d9d6d5fa30cf0508713114"
+      "sha256": "f120623037ad278a195ab0cec7bdd83a7c060c51150f535e8e52c80b16ac5c35"
     },
     {
       "path": "references/text-engine.md",
       "sha256": "575221ed84663c85effe0e3dea067d994a696b9a01f31abe65054640d3d9439c"
     },
     {
+      "path": "scripts/human_issue_learning.py",
+      "sha256": "5f178ba13e5cf5b659c6658a329b94dc1d0bed5dc4c8ae82a35549e971c91f6d"
+    },
+    {
       "path": "scripts/pipeline_version.py",
-      "sha256": "7552ba09af41bdbe4e45b42578714ab277a99f5ef9a9881ead55fee3721c4b96"
+      "sha256": "93a0b46ee57359ac5b42a371e568e414f8be830a19df997e88a2748281b9ddfe"
     },
     {
       "path": "scripts/release_gate.py",
@@ -49,11 +53,15 @@
     },
     {
       "path": "scripts/validate_audit.py",
-      "sha256": "101ff94444d224de89c2e53ba82befd1192c9fe7847b48ebe2b6091679d9b9a5"
+      "sha256": "413db9fe1e2059f05d6174e4751a9c50fafaca17240e9282ffe477266d80eb5c"
     },
     {
       "path": "scripts/validate_detection_benchmark.py",
       "sha256": "37335ff9bd6494996e5740c42b7fa31641681ad75ec8129b25c3788bb2db2ce0"
+    },
+    {
+      "path": "scripts/validate_human_issue_annotations.py",
+      "sha256": "d70c893ec53b619eb3e8d92a7bebefd7c6040b1bd07f74777aaaac49a409910c"
     },
     {
       "path": "scripts/validate_human_visual_selection.py",
@@ -61,7 +69,7 @@
     },
     {
       "path": "scripts/validate_release_certificate.py",
-      "sha256": "742bfb2d1674e8b32b8c71107d082ba51bfaece9d7ebe578d71b348d143c763c"
+      "sha256": "31a0a422a88ac2581a64d3fad9bc38c34a69b2932a96593d3c2d9f36791c497d"
     },
     {
       "path": "scripts/validate_source_text_audit.py",
@@ -69,7 +77,7 @@
     },
     {
       "path": "SKILL.md",
-      "sha256": "b944c87cef6d25828b1956efba6c8c3d9a8a3433e38183ad10fc2b9d3e321f4a"
+      "sha256": "7bf01503716f2bb68e983a4db3123c8036d36939876c823cdd9dba28590a36e7"
     }
   ]
 }

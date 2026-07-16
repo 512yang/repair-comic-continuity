@@ -46,6 +46,44 @@ Selected pages retain a full-resolution `continuity` audit with a `full_resoluti
 
 In this mode, every input page still receives independent machine/visual source-text coverage, novel alignment, crop evidence, repeat and malformed-glyph checks, and a confirmed source-text audit. Every text-bearing page follows `page_reset_preserve_style`: preserve font family, weight, color, size, position, writing direction, line geometry, and balloon geometry. The final output remains an exact input/output bijection with identical relative filenames and count.
 
+### User-confirmed issue annotations
+
+When the user identifies what is wrong and where to change it, keep `human_visual_selection.json` as the redraw-scope authority and add `evidence/human_issue_annotations.json`:
+
+```json
+{
+  "version": 1,
+  "status": "confirmed",
+  "mode": "human_visual_auto_text",
+  "confirmed_by": "user",
+  "confirmed_at": "2026-07-16T10:00:00+08:00",
+  "annotations": [
+    {
+      "annotation_id": "249-beard",
+      "page": {"path": "249.jpg", "sha256": "<sealed-source-sha256>"},
+      "regions": [
+        {
+          "region_id": "lower-face",
+          "bbox_norm": [0.31, 0.18, 0.54, 0.41],
+          "description": "lower face and beard"
+        }
+      ],
+      "targets": ["character:邓正虎"],
+      "defect_codes": ["identity_drift"],
+      "observed_state": "beard is missing",
+      "required_state": "restore the identity-reference beard",
+      "instruction": "change only the beard and related facial detail"
+    }
+  ],
+  "learning_policy": "evidence_gated",
+  "persistence_policy": "page_cluster_project_skill_candidate"
+}
+```
+
+Use normalized `[left, top, right, bottom]` boxes within `[0, 1]`; use `[0, 0, 1, 1]` only when the user explicitly marks the whole page. Resolve verbal locations into boxes, but do not invent the observed state or required correction. Annotation pages must be selected, input-relative, naturally ordered, unique, and hash-current.
+
+Every annotated page must add exactly one `human_issue_annotation` audit record whose `user_confirmed_issue_annotations` artifact binds the annotation manifest path and SHA-256. A missing or stale binding blocks classification. The audit must still contain the selected page's full-resolution continuity record; the annotation does not prove that the proposed correction is visually safe.
+
 ## Promote candidates
 
 Class-specific preflight precedes blind review. The generator and reviewer must differ. Page review must occur after candidate creation; cluster QA must occur after every member page review; the final report must occur after cluster QA.

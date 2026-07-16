@@ -193,6 +193,30 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, documents)
 
+    def test_human_issue_annotations_are_evidence_gated_not_instant_self_training(self):
+        documents = "\n".join(
+            (
+                read("SKILL.md"),
+                read("references/scene-cluster-pipeline.md"),
+                read("references/failure-learning.md"),
+            )
+        )
+        for phrase in (
+            "human_issue_annotations.json",
+            "user-confirmed region",
+            "observed state",
+            "required correction",
+            "never becomes an effective learned rule by itself",
+            "positive regression",
+            "clean control",
+            "variation",
+            "independent review",
+            "page -> cluster -> project -> skill_candidate",
+            "fresh signed release",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
 
 if __name__ == "__main__":
     unittest.main()

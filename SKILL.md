@@ -1,6 +1,6 @@
 ---
 name: repair-comic-continuity
-description: Use when Codex must audit or repair Chinese comic pages against a novel, character references, or adjacent pages, especially for cross-page identity, costume, prop, scene, malformed-glyph, exact-filename, or style-continuity problems.
+description: Use when Codex must audit or repair Chinese comic pages against a novel, character references, adjacent pages, or user-confirmed issue regions, especially for cross-page identity, costume, prop, scene, malformed-glyph, exact-filename, or style-continuity problems.
 ---
 
 # Repair Comic Continuity
@@ -44,6 +44,10 @@ When the user supplies the visual-problem page numbers or names, use `human_visu
 - In this mode, every input page still receives the complete source-text audit. Every ordinary text-bearing page still uses `page_reset_preserve_style`, preserving the original font, color, size, position, orientation, line geometry, and balloon geometry.
 - Empty visual selection is valid, but it never disables all-page text work. Unknown, duplicate, reordered, or source-hash-drifted selections are `evidence_blocked`.
 - Preserve the exact input/output bijection, including identical relative path, filename, extension, and page count.
+
+If the user also identifies what is wrong and where to change it, write every user-confirmed region, observed state, required correction, affected target, and instruction to `evidence/human_issue_annotations.json`. Validate it with `scripts/validate_human_issue_annotations.py`, bind it to the selected page's audit by path and SHA-256, and ingest it transactionally with `scripts/human_issue_learning.py`. An annotation never becomes an effective learned rule by itself; it starts only as observed failure evidence.
+
+Promote learned corrections only after positive regression, clean control, variation, and independent review pass with hash-bound artifacts. Follow `page -> cluster -> project -> skill_candidate` without skipping scope. A candidate becomes permanent across installations only through a reviewed Skill change and fresh signed release.
 
 See [scene-cluster-pipeline.md](references/scene-cluster-pipeline.md) for the exact manifest and audit-record contracts.
 

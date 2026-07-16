@@ -11,6 +11,7 @@ from typing import Any
 from entity_timeline import validate_timeline
 from pipeline_contracts import canonical_hash
 from validate_appearance_matrix import validate_matrix
+from validate_human_issue_annotations import validate_human_issue_annotations
 from validate_human_visual_selection import validate_human_visual_selection
 from validate_source_text_audit import validate_source_text_audit
 from project_common import (
@@ -107,6 +108,28 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
         selected_visual_pages = input_names
     selected_visual_set = set(selected_visual_pages)
 
+    annotations_path = evidence / "human_issue_annotations.json"
+    if annotations_path.is_file():
+        if audit_mode != "human_visual_auto_text":
+            raise ValueError(
+                "audit-only human issue annotations requires human visual selection"
+            )
+        try:
+            issue_annotations = validate_human_issue_annotations(
+                _load_json(annotations_path),
+                project.input_dir,
+                input_names,
+                selected_visual_pages,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"audit-only human issue annotations are invalid: {exc}"
+            ) from exc
+        annotated_pages = set(issue_annotations["annotated_pages"])
+    else:
+        issue_annotations = None
+        annotated_pages = set()
+
     matrix_path = evidence / "character_appearance_matrix.json"
     if selected_visual_pages:
         if not matrix_path.is_file():
@@ -171,6 +194,14 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
     selection_hash = (
         _sha256(selection_path) if audit_mode == "human_visual_auto_text" else None
     )
+    annotations_relative = (
+        annotations_path.relative_to(project.root).as_posix()
+        if issue_annotations is not None
+        else None
+    )
+    annotations_hash = (
+        _sha256(annotations_path) if issue_annotations is not None else None
+    )
     for page in input_names:
         row = by_page[page]
         records = row.get("audits") if isinstance(row.get("audits"), list) else []
@@ -209,6 +240,30 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
                 raise ValueError(
                     f"audit-only human visual scope artifact mismatch: {page}"
                 )
+        annotation_records = [
+            record for record in records
+            if isinstance(record, dict)
+            and record.get("perspective") == "human_issue_annotation"
+            and record.get("artifact", {}).get("kind")
+            == "user_confirmed_issue_annotations"
+        ]
+        if page in annotated_pages:
+            if len(annotation_records) != 1:
+                raise ValueError(
+                    f"audit-only page requires one human issue annotation audit: {page}"
+                )
+            annotation_artifact = annotation_records[0]["artifact"]
+            if (
+                annotation_artifact.get("path") != annotations_relative
+                or annotation_artifact.get("sha256") != annotations_hash
+            ):
+                raise ValueError(
+                    f"audit-only human issue annotation artifact mismatch: {page}"
+                )
+        elif annotation_records:
+            raise ValueError(
+                f"audit-only unannotated page contains human issue annotation audit: {page}"
+            )
         decision = row.get("decision")
         if page not in selected_visual_set and decision == "full_page_redraw":
             raise ValueError(
@@ -251,6 +306,10 @@ def validate_audit_project(root: Path, evidence_dir: Path) -> dict[str, Any]:
         "second_review_count": second_reviews,
         "audit_mode": audit_mode,
         "selected_visual_page_count": len(selected_visual_pages),
+        "human_issue_annotation_count": (
+            issue_annotations["annotation_count"] if issue_annotations else 0
+        ),
+        "human_issue_annotated_page_count": len(annotated_pages),
         "appearance_matrix_status": appearance_matrix_status,
         "source_text_audit_count": len(input_names),
     }
