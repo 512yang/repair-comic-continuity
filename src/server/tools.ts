@@ -30,6 +30,12 @@ export interface WorkbenchToolDependencies {
     request: NormalizedCommitRequest,
   ) => Promise<unknown> | unknown;
   readStatus?: (input: { projectRoot: string }) => Promise<unknown> | unknown;
+  onSessionOpened?: (session: {
+    sessionId: string;
+    projectRoot: string;
+    inputRoot: string;
+    pages: Array<{ path: string; sha256: string; bytes: number }>;
+  }) => void;
 }
 
 export type ToolCallResult =
@@ -47,10 +53,24 @@ export function createWorkbenchToolService(
       const projectRoot = requiredString(input.projectRoot, "projectRoot");
       const mode = reviewMode(input.mode);
       const session = createProjectSession(projectRoot, mode);
+      dependencies.onSessionOpened?.({
+        sessionId: session.sessionId,
+        projectRoot: session.projectRoot,
+        inputRoot: session.inventory.input_root,
+        pages: session.inventory.pages,
+      });
       return {
+        sessionId: session.sessionId,
+        projectRoot: session.projectRoot,
         mode: session.mode,
         modeLockedAt: session.modeLockedAt,
+        phase: session.phase,
         inventory: session.inventory,
+        pages: session.inventory.pages.map((page, index) => ({
+          path: page.path,
+          sourceUri: `comic-page://${session.sessionId}/input/${index}`,
+          outputUri: `comic-page://${session.sessionId}/output/${index}`,
+        })),
       };
     },
     save_review_draft: async (input) => {

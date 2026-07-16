@@ -33,8 +33,33 @@ export class ProjectSession {
     return this.state.mode;
   }
 
+  get sessionId(): string {
+    return this.state.session_id;
+  }
+
+  get projectRoot(): string {
+    return this.state.project_root;
+  }
+
+  get phase(): RunPhase {
+    return this.state.phase;
+  }
+
   get modeLockedAt(): string | null {
     return this.state.mode_locked_at;
+  }
+
+  chooseMode(mode: ReviewMode): void {
+    if (this.state.mode_locked_at) {
+      if (this.state.mode !== mode) {
+        throw new Error(`Project mode is already locked to ${this.state.mode}.`);
+      }
+      return;
+    }
+    if (this.state.mode === mode) return;
+    const now = new Date().toISOString();
+    this.state = { ...this.state, mode, updated_at: now };
+    writeAtomicJson(this.sessionPath, this.state);
   }
 
   lockMode(mode: ReviewMode): void {
@@ -76,6 +101,7 @@ export function createProjectSession(
     if (stored.mode_locked_at && stored.mode !== mode) {
       throw new Error(`Project mode is already locked to ${stored.mode}.`);
     }
+    existing.chooseMode(mode);
     return existing;
   }
 

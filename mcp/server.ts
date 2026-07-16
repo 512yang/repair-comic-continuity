@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   RESOURCE_MIME_TYPE,
@@ -11,6 +12,7 @@ import {
 import { z } from "zod/v4";
 
 import { commitNormalizedWithPython } from "../src/server/pythonCommit";
+import { resolveInside, sha256File } from "../src/server/projectInventory";
 import {
   createWorkbenchToolService,
   type ToolCallResult,
@@ -24,8 +26,19 @@ export function createMcpServer(): McpServer {
     name: "repair-comic-continuity-workbench",
     version: "1.0.0",
   });
+  const imageSessions = new Map<
+    string,
+    {
+      projectRoot: string;
+      inputRoot: string;
+      pages: Array<{ path: string; sha256: string; bytes: number }>;
+    }
+  >();
   const tools = createWorkbenchToolService({
     commitNormalized: commitNormalizedWithPython,
+    onSessionOpened: ({ sessionId, projectRoot, inputRoot, pages }) => {
+      imageSessions.set(sessionId, { projectRoot, inputRoot, pages });
+    },
   });
   const invoke = async (
     name: WorkbenchToolName,
@@ -47,6 +60,44 @@ export function createMcpServer(): McpServer {
         },
       ],
     }),
+  );
+
+  server.registerResource(
+    "漫画项目页面",
+    new ResourceTemplate("comic-page://{sessionId}/{kind}/{index}", {
+      list: undefined,
+    }),
+    { description: "按已封存项目清单读取输入页或对应输出页。" },
+    async (uri) => {
+      const match = /^comic-page:\/\/([^/]+)\/(input|output)\/(\d+)$/.exec(
+        uri.href,
+      );
+      if (!match) throw new Error("Invalid comic page resource URI.");
+      const [, sessionId, kind, rawIndex] = match;
+      const session = imageSessions.get(sessionId!);
+      if (!session) throw new Error("Unknown or expired comic page session.");
+      const index = Number(rawIndex);
+      const page = session.pages[index];
+      if (!page) throw new Error("Comic page index is outside the sealed inventory.");
+      const root = kind === "input" ? session.inputRoot : join(session.projectRoot, "输出");
+      const absolutePath = resolveInside(root, page.path);
+      if (!existsSync(absolutePath)) {
+        throw new Error(`Comic ${kind} page is not available: ${page.path}`);
+      }
+      if (kind === "input" && sha256File(absolutePath) !== page.sha256) {
+        throw new Error(`Sealed input page changed after project open: ${page.path}`);
+      }
+      const bytes = await readFile(absolutePath);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: imageMimeType(absolutePath),
+            blob: bytes.toString("base64"),
+          },
+        ],
+      };
+    },
   );
 
   registerAppTool(
@@ -145,6 +196,22 @@ export function createMcpServer(): McpServer {
     async (input) => invoke("record_output_page_decision", input),
   );
   return server;
+}
+
+function imageMimeType(path: string): string {
+  const extension = extname(path).toLocaleLowerCase();
+  return (
+    {
+      ".bmp": "image/bmp",
+      ".gif": "image/gif",
+      ".jpeg": "image/jpeg",
+      ".jpg": "image/jpeg",
+      ".png": "image/png",
+      ".tif": "image/tiff",
+      ".tiff": "image/tiff",
+      ".webp": "image/webp",
+    }[extension] ?? "application/octet-stream"
+  );
 }
 
 function toolResult(result: ToolCallResult) {

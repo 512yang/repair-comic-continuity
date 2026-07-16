@@ -51,6 +51,17 @@ describe("project sessions", () => {
     expect(readFileSync(join(root, "输入", "2.jpg"))).toEqual(before);
   });
 
+  it("allows the start-screen choice to change mode until the first submit", () => {
+    const root = makeProject();
+    createProjectSession(root, "human_visual_auto_text");
+    const changed = createProjectSession(root, "automatic");
+    expect(changed.mode).toBe("automatic");
+    changed.lockMode("automatic");
+    expect(() => createProjectSession(root, "human_visual_auto_text")).toThrow(
+      /already locked/i,
+    );
+  });
+
   it("autosaves per-page drafts and rejects paths outside the project", () => {
     const root = makeProject();
     saveDraft(root, "input_review", "分镜/2.jpg", {

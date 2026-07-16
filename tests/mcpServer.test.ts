@@ -6,10 +6,13 @@ import { APP_RESOURCE_URI } from "../mcp/server";
 import { TOOL_NAMES } from "../src/server/tools";
 
 let client: Client | undefined;
+let projectRoot: string | undefined;
 
 afterEach(async () => {
   await client?.close();
   client = undefined;
+  if (projectRoot) await rm(projectRoot, { recursive: true, force: true });
+  projectRoot = undefined;
 });
 
 describe("built MCP server", () => {
@@ -35,4 +38,43 @@ describe("built MCP server", () => {
       "漫画审校工作台",
     );
   });
+
+  it("serves a sealed input page through an opaque session resource URI", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "comic-workbench-mcp-"));
+    await mkdir(join(projectRoot, "输入"));
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=",
+      "base64",
+    );
+    await writeFile(join(projectRoot, "输入", "0001.png"), png);
+
+    client = new Client({ name: "workbench-image-test", version: "1.0.0" });
+    await client.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: ["dist/mcp/server.cjs", "--stdio"],
+        cwd: process.cwd(),
+        stderr: "pipe",
+      }),
+    );
+    const opened = await client.callTool({
+      name: "open_comic_review_workbench",
+      arguments: { projectRoot, mode: "human_visual_auto_text" },
+    });
+    const payload = opened.structuredContent as {
+      ok: true;
+      data: { pages: Array<{ sourceUri: string }> };
+    };
+    const uri = payload.data.pages[0]!.sourceUri;
+    expect(uri).toMatch(/^comic-page:\/\/[a-f0-9-]+\/input\/0$/);
+
+    const image = await client.readResource({ uri });
+    expect(image.contents[0]).toMatchObject({ uri, mimeType: "image/png" });
+    expect("blob" in image.contents[0]! && image.contents[0].blob).toBe(
+      png.toString("base64"),
+    );
+  });
 });
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
