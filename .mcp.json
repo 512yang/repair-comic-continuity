@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "comicReviewWorkbench": {
+      "title": "漫画审校工作台",
+      "description": "Open and persist the local comic review workbench.",
+      "cwd": ".",
+      "command": "node",
+      "args": ["./dist/mcp/server.cjs", "--stdio"]
+    }
+  }
+}

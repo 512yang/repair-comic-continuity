@@ -1,0 +1,27 @@
+{
+  "name": "repair-comic-continuity-workbench",
+  "version": "1.0.0",
+  "description": "Review, annotate, repair, and re-review Chinese comic pages through Codex.",
+  "author": {
+    "name": "512yang",
+    "url": "https://github.com/512yang"
+  },
+  "homepage": "https://github.com/512yang/repair-comic-continuity",
+  "repository": "https://github.com/512yang/repair-comic-continuity",
+  "license": "MIT",
+  "keywords": ["comic", "continuity", "annotation", "text-repair"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "漫画审校工作台",
+    "shortDescription": "圈画、批注并由 Codex 完成漫画修复闭环",
+    "longDescription": "在人工审查或全自动模式下审核输入、监管处理并逐页复核输出。",
+    "developerName": "512yang",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "启动漫画审校工作台",
+      "继续当前漫画审校项目"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
