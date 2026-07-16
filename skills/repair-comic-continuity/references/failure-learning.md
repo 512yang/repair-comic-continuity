@@ -28,3 +28,19 @@ Use `ingest_annotations_transactionally` to update `failure_learning.json`; a pa
 At the next run, call `load_effective_rules_for_page` for the current page, cluster, and annotated targets. It binds the durable registry revision and independent-review artifact to the prompt, maps approved failure families to controlled actions, and includes the reviewed corrective action. Apply `page > cluster > project > skill_candidate`. If two same-scope rules affect the same target and failure code but prescribe different corrections, report `conflicting effective rules` and stop until independent review revokes or supersedes one rule.
 
 Use optional `trait_codes` for searchable details without replacing canonical failure families: `skin_tone`, `facial_hair`, `hair_style`, `hair_color`, `headwear`, `clothing`, `prop`, `body_build`, `face_shape`, `anatomy`, `scene`, `text_glyph`, `text_style`, `balloon_geometry`, and `sound_effect`.
+
+## Output revision feedback
+
+Store every output-review round as a new immutable
+`evidence/human_revision_feedback/attempt-<N>.json`; never overwrite an earlier
+attempt. Validate it with `scripts/validate_human_revision_feedback.py`. Every
+record must bind the sealed source page, the exact reviewed candidate hash, its
+attempt number, one of the five review origins, the original user note, and all
+reviewed regions.
+
+Ingest accepted feedback through `ingest_human_revision_feedback` or the
+controller's transactional wrapper. The result is observed failure evidence
+only. It must not become an effective prompt rule until the normal positive
+regression, clean control, variation, and independent-review gates pass. A
+revision run with feedback must complete the `revision_feedback_ingested`
+receipt before releasing any revision task.

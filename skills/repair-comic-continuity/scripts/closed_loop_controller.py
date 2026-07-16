@@ -19,7 +19,10 @@ from failure_learning import (
     select_effective_rules,
     validate_failure_store,
 )
-from human_issue_learning import ingest_human_issue_annotations
+from human_issue_learning import (
+    ingest_human_issue_annotations,
+    ingest_human_revision_feedback,
+)
 from pipeline_contracts import canonical_hash, normalize_relative_image_path
 
 
@@ -54,6 +57,7 @@ STAGES = (
     "inventory_sealed",
     "audit_passed",
     "annotations_ingested",
+    "revision_feedback_ingested",
     "tasks_released",
     "candidate_reviewed",
     "learning_recorded",
@@ -465,6 +469,36 @@ def ingest_annotations_transactionally(
     return failures
 
 
+def ingest_revision_feedback_transactionally(
+    *,
+    store_path: Path,
+    validated_feedback: dict[str, Any],
+    cluster_by_page: Mapping[str, str],
+    prompt_reference_hash: str,
+) -> list[dict[str, Any]]:
+    """Persist revision feedback failures atomically without promoting rules."""
+    path = Path(store_path)
+    if path.exists():
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("failure learning store is unreadable") from exc
+    else:
+        store = new_failure_store()
+    validate_failure_store(store)
+    before = copy.deepcopy(store)
+    failures = ingest_human_revision_feedback(
+        store,
+        validated_feedback,
+        cluster_by_page,
+        prompt_reference_hash,
+    )
+    validate_failure_store(store)
+    if store != before or not path.exists():
+        _atomic_write_json(path, store)
+    return failures
+
+
 def record_outcomes_transactionally(
     *,
     store_path: Path,
@@ -558,10 +592,16 @@ def build_run_preview(
 
 
 def new_closed_loop_state(
-    *, run_id: object, created_at: object, annotation_count: int
+    *,
+    run_id: object,
+    created_at: object,
+    annotation_count: int,
+    revision_feedback_count: int = 0,
 ) -> dict[str, Any]:
     if not isinstance(annotation_count, int) or annotation_count < 0:
         raise ValueError("annotation_count must be a nonnegative integer")
+    if not isinstance(revision_feedback_count, int) or revision_feedback_count < 0:
+        raise ValueError("revision_feedback_count must be a nonnegative integer")
     body = {
         "schema_version": SCHEMA_VERSION,
         "run_id": _stable_id(run_id, "run_id"),
@@ -569,13 +609,20 @@ def new_closed_loop_state(
         "annotation_count": annotation_count,
         "receipts": [],
     }
+    if revision_feedback_count:
+        body["revision_feedback_count"] = revision_feedback_count
     return {**body, "state_sha256": canonical_hash(body)}
 
 
-def _required_stages(annotation_count: int) -> tuple[str, ...]:
-    if annotation_count:
-        return STAGES
-    return tuple(stage for stage in STAGES if stage != "annotations_ingested")
+def _required_stages(
+    annotation_count: int, revision_feedback_count: int = 0
+) -> tuple[str, ...]:
+    excluded = set()
+    if not annotation_count:
+        excluded.add("annotations_ingested")
+    if not revision_feedback_count:
+        excluded.add("revision_feedback_ingested")
+    return tuple(stage for stage in STAGES if stage not in excluded)
 
 
 def validate_closed_loop_state(value: object) -> dict[str, Any]:
@@ -589,15 +636,21 @@ def validate_closed_loop_state(value: object) -> dict[str, Any]:
         "receipts",
         "state_sha256",
     }
-    if set(value) != required or value.get("schema_version") != SCHEMA_VERSION:
+    allowed_key_sets = (required, required | {"revision_feedback_count"})
+    if set(value) not in allowed_key_sets or value.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("closed-loop state fields or version are invalid")
     count = value["annotation_count"]
     if not isinstance(count, int) or count < 0:
         raise ValueError("annotation_count must be a nonnegative integer")
+    revision_count = value.get("revision_feedback_count", 0)
+    if not isinstance(revision_count, int) or revision_count < 0:
+        raise ValueError("revision_feedback_count must be a nonnegative integer")
+    if "revision_feedback_count" in value and revision_count == 0:
+        raise ValueError("zero revision_feedback_count must be omitted")
     receipts = value["receipts"]
     if not isinstance(receipts, list):
         raise ValueError("receipts must be a list")
-    required_stages = _required_stages(count)
+    required_stages = _required_stages(count, revision_count)
     if [row.get("stage") for row in receipts] != list(required_stages[: len(receipts)]):
         raise ValueError("closed-loop receipts are missing, duplicated, or out of order")
     normalized_receipts = []
@@ -620,6 +673,8 @@ def validate_closed_loop_state(value: object) -> dict[str, Any]:
         "annotation_count": count,
         "receipts": normalized_receipts,
     }
+    if revision_count:
+        body["revision_feedback_count"] = revision_count
     if value.get("state_sha256") != canonical_hash(body):
         raise ValueError("state_sha256 mismatch")
     return {**body, "state_sha256": canonical_hash(body)}
@@ -634,7 +689,9 @@ def advance_stage(
     timestamp: object,
 ) -> dict[str, Any]:
     validate_closed_loop_state(state)
-    required = _required_stages(state["annotation_count"])
+    required = _required_stages(
+        state["annotation_count"], state.get("revision_feedback_count", 0)
+    )
     next_index = len(state["receipts"])
     if next_index >= len(required):
         raise ValueError("closed-loop run is already complete")
@@ -643,6 +700,10 @@ def advance_stage(
     if requested != expected:
         if expected == "annotations_ingested":
             raise ValueError("annotation ingestion receipt is required before task release")
+        if expected == "revision_feedback_ingested":
+            raise ValueError(
+                "revision feedback ingestion receipt is required before task release"
+            )
         raise ValueError(f"next required stage is {expected}")
     normalized_artifacts = [_artifact(item, "stage artifact") for item in artifacts]
     if not normalized_artifacts:
@@ -778,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--run-id", required=True)
     create.add_argument("--created-at", required=True)
     create.add_argument("--annotation-count", type=int, required=True)
+    create.add_argument("--revision-feedback-count", type=int, default=0)
 
     validate = commands.add_parser("validate-state")
     validate.add_argument("--state", type=Path, required=True)
@@ -803,6 +865,12 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--cluster-map", type=Path, required=True)
     ingest.add_argument("--prompt-reference-hash", required=True)
 
+    ingest_revision = commands.add_parser("ingest-revision-feedback")
+    ingest_revision.add_argument("--store", type=Path, required=True)
+    ingest_revision.add_argument("--feedback", type=Path, required=True)
+    ingest_revision.add_argument("--cluster-map", type=Path, required=True)
+    ingest_revision.add_argument("--prompt-reference-hash", required=True)
+
     outcome = commands.add_parser("record-outcomes")
     outcome.add_argument("--store", type=Path, required=True)
     outcome.add_argument("--failure-ids", type=Path, required=True)
@@ -827,6 +895,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=args.run_id,
                 created_at=args.created_at,
                 annotation_count=args.annotation_count,
+                revision_feedback_count=args.revision_feedback_count,
             )
             _atomic_write_json(args.state, result)
         elif args.command == "validate-state":
@@ -867,6 +936,15 @@ def main(argv: list[str] | None = None) -> int:
                 store_path=args.store,
                 validated_annotations=_load_json_file(
                     args.annotations, "validated annotations"
+                ),
+                cluster_by_page=_load_json_file(args.cluster_map, "cluster map"),
+                prompt_reference_hash=args.prompt_reference_hash,
+            )
+        elif args.command == "ingest-revision-feedback":
+            result = ingest_revision_feedback_transactionally(
+                store_path=args.store,
+                validated_feedback=_load_json_file(
+                    args.feedback, "validated revision feedback"
                 ),
                 cluster_by_page=_load_json_file(args.cluster_map, "cluster map"),
                 prompt_reference_hash=args.prompt_reference_hash,
