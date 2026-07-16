@@ -537,6 +537,41 @@ class EmbeddedTextEngineTests(unittest.TestCase):
             self.assertGreater(min(cleaned.getpixel((60, 37))), 220)
             self.assertEqual(cleaned.getpixel((5, 5)), (240, 240, 240))
 
+    def test_page_cleanup_backend_routes_image2_without_running_lama(self):
+        engine = importlib.import_module("text_engine_pipeline")
+        line = engine.TextLine("测试", 1.0, (1, 1, 10, 10), [])
+        image2_block = engine.TextBlock(
+            lines=[line], box=(1, 1, 10, 10), kind="dialogue",
+            rewrite_text="测试", original_text="测试", confidence=1.0,
+            orientation="horizontal", fill=(0, 0, 0),
+            background_cleanup="gpt_image_2",
+        )
+        flat_block = engine.TextBlock(
+            lines=[line], box=(20, 1, 30, 10), kind="dialogue",
+            rewrite_text="测试", original_text="测试", confidence=1.0,
+            orientation="horizontal", fill=(0, 0, 0),
+            background_cleanup="flat_inpaint",
+        )
+        self.assertEqual(
+            engine.page_cleanup_backend([image2_block, flat_block]),
+            "gpt_image_2",
+        )
+
+    def test_page_cleanup_backend_rejects_mixed_lama_and_image2(self):
+        engine = importlib.import_module("text_engine_pipeline")
+        line = engine.TextLine("测试", 1.0, (1, 1, 10, 10), [])
+        blocks = [
+            engine.TextBlock(
+                lines=[line], box=(1, 1, 10, 10), kind="dialogue",
+                rewrite_text="测试", original_text="测试", confidence=1.0,
+                orientation="horizontal", fill=(0, 0, 0),
+                background_cleanup=cleanup,
+            )
+            for cleanup in ("lama", "gpt_image_2")
+        ]
+        with self.assertRaisesRegex(ValueError, "cannot mix"):
+            engine.page_cleanup_backend(blocks)
+
 
 if __name__ == "__main__":
     unittest.main()

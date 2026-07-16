@@ -18,6 +18,14 @@ Release expensive work only after an independently reviewed canary passes. `unch
 
 A valid signed generic release certificate removes only redundant cross-installation golden-sample labeling. Every new project still runs one automatic full-cluster canary. Escalate to the user only for unresolved independent-auditor disagreement, `evidence_blocked`, an invalid certificate, or a new uncovered failure family.
 
+### Workbench review boundary
+
+Launch the bundled review app with `open_comic_review_workbench`. In `human_visual_auto_text`, the user supplies visual scope while the text engine still audits all pages. In `automatic`, Codex builds visual scope and the user reviews the first output set page by page. The workbench stores raw annotations only; normalization and evidence commit remain separate. Passed pages remain locked to their candidate hashes. After a revision, only a page whose candidate hash changes returns to review. Final promotion preserves the same relative path, filename, case, and extension and exact input count.
+
+### Hash-bound audit reuse
+
+Use `scripts/audit_cache.py` to build a hash-bound audit cache only for deterministic or machine-derived artifacts. Its key must include pipeline version, mode, novel hash, every relevant reference hash, source page hash, cluster identity, and reviewed-rule hashes. Any source, novel, reference, cluster, mode, or rule drift must invalidate the affected entry. The cache never caches human approval, candidate approval, independent review, or release receipts.
+
 ## Audit-only mode
 
 Before generation, `validate_audit.py` proves alignment, clusters, references, timelines, full-resolution audits, second reviews, and final classifications. It rejects candidates, completed repair tasks, and output images.

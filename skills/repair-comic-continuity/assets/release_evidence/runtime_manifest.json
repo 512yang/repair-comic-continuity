@@ -1,15 +1,23 @@
 {
   "schema_version": "1.0",
-  "release_id": "continuity-v5.5-signed-20260716",
+  "release_id": "continuity-v5.6-workbench-signed-20260716",
   "scope": "generic_detection_control_plane",
   "files": [
     {
       "path": "SKILL.md",
-      "sha256": "ebb7860d7b043c4eb69fcedefdac8a6e9d1db733b98f2057076a252f68a05590"
+      "sha256": "4bf501764979259dbe16260a4ab2185278250fa833202aa5d631140909b93278"
     },
     {
       "path": "agents/openai.yaml",
-      "sha256": "4ca8b9504ef93f2b685275b42485b0589377cda3524b50607345d9736d5b2ca1"
+      "sha256": "11b3eda8b111c8a5b81ddccf8e3dd133b27a23a9c35f83d0f693e193b99b4bf3"
+    },
+    {
+      "path": "assets/release_evidence/detected_text_detection_v2.json",
+      "sha256": "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
+    },
+    {
+      "path": "assets/release_evidence/golden_text_detection_v2.json",
+      "sha256": "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
     },
     {
       "path": "references/continuity-rules.md",
@@ -17,7 +25,7 @@
     },
     {
       "path": "references/failure-learning.md",
-      "sha256": "369ea321bbcacd2c6c9f4c2a877f38ab89141aed69e2826b4297ee4543758442"
+      "sha256": "aef8b9be1cb6bbfeec0731bdb396c5d858d5dbfffeaccfe03ff213412f1c35bc"
     },
     {
       "path": "references/qa-checklist.md",
@@ -25,11 +33,15 @@
     },
     {
       "path": "references/scene-cluster-pipeline.md",
-      "sha256": "5a80efe6798bd649aecc1b0ca3ccf8f2c3a54c734991b32c8a013036c1c426a6"
+      "sha256": "65528d1a8db3b9143e84766d93e337215fa9f2e12a3369a30442f78853535f1c"
     },
     {
       "path": "references/text-engine.md",
-      "sha256": "575221ed84663c85effe0e3dea067d994a696b9a01f31abe65054640d3d9439c"
+      "sha256": "15ca96501b807b32c5fe8bb0d8806c11b2e6bd2557456889155bb92cc65cdd4c"
+    },
+    {
+      "path": "scripts/audit_cache.py",
+      "sha256": "0146542cdd82c41e14ac14da4a0d8df2bf801a3d738f5a4d7335a67d5f515932"
     },
     {
       "path": "scripts/audit_evidence.py",
@@ -45,7 +57,7 @@
     },
     {
       "path": "scripts/closed_loop_controller.py",
-      "sha256": "d67d30578252bd47d6acb4e26f6f49922a5cc60d8c96c3f60a2586de415217d9"
+      "sha256": "1699126f60ed15ef0f630d74102685c5e2f6282b3d1601bf35a91dddc0558da2"
     },
     {
       "path": "scripts/comic_text_repair_v2.py",
@@ -69,7 +81,7 @@
     },
     {
       "path": "scripts/human_issue_learning.py",
-      "sha256": "3447b750077fd9c29de084ca3e55e878115cee9468197e2cdf076bf067551060"
+      "sha256": "4fb0e69cd73c8bc869d043746c1ebad65a7fbec2fc80f4220c175809f5c9efd3"
     },
     {
       "path": "scripts/inventory_project.py",
@@ -85,7 +97,7 @@
     },
     {
       "path": "scripts/pipeline_version.py",
-      "sha256": "fcfc8c43acf3cd0d5d90c783d6e41974943faa1c0c645fa18a4d9bc71e99ce48"
+      "sha256": "385ed682c3af1dc0a0458b6fe77497515ad1972a907ca7b0c70310ff2a00a311"
     },
     {
       "path": "scripts/prepare_run_workspace.py",
@@ -120,8 +132,12 @@
       "sha256": "7fb38bcd26cb25a262484a0c90c96ee9b11f482cdb3febd44c59bc04ce7dbe42"
     },
     {
+      "path": "scripts/text_cleanup_router.py",
+      "sha256": "c69473528707de5cf795cc1ef0091f26d3f2436654c85afd59cbc715d39fbf07"
+    },
+    {
       "path": "scripts/text_engine_pipeline.py",
-      "sha256": "d29759bd07788d0b875bf6bbe9173bf1cec422a2520c01d6ab48523e3b8ddc55"
+      "sha256": "089bbfb1d53202b29388cd733441e91742f61e9e340d190913728a9119542b8a"
     },
     {
       "path": "scripts/text_style_contract.py",
@@ -141,7 +157,7 @@
     },
     {
       "path": "scripts/validate_human_issue_annotations.py",
-      "sha256": "e66c1a90e41b8e73789f4ada492f07cb8def32ff2be128dd04ab87453b49b200"
+      "sha256": "c8500ff14894495e9f2d46c2887d33e944dd9c06d8f1a8adcde1667453a8ae72"
     },
     {
       "path": "scripts/validate_human_visual_selection.py",
@@ -153,19 +169,11 @@
     },
     {
       "path": "scripts/validate_release_certificate.py",
-      "sha256": "252330bb627c182a58944300b298aa3a87d1b76f53b152a63eb5c00f24988837"
+      "sha256": "3b90a8a818eb4b2ff31efe430eb97f9f931636c841e16a144de93433767ce0d9"
     },
     {
       "path": "scripts/validate_source_text_audit.py",
       "sha256": "5a0c267984b197ad62f27f5856c24438ce91261a9fffe1b5ceb0bfec62e0b6df"
-    },
-    {
-      "path": "assets/release_evidence/golden_text_detection_v2.json",
-      "sha256": "82c564245fdd8be676e846095a255936692fe48292c364dd2d804b8d6e366e94"
-    },
-    {
-      "path": "assets/release_evidence/detected_text_detection_v2.json",
-      "sha256": "399afe9e5e9e8cb041af44634ea57df9aca5352192cf65c8144aa9f6a4ed64b5"
     }
   ]
 }

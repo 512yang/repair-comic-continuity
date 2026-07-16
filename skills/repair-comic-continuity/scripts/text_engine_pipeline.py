@@ -209,6 +209,10 @@ def build_parser(script_dir=None):
         help="Confirmed reviewed text/style manifest required before rendering",
     )
     parser.add_argument("--lama-root", default=str(discover_lama_root()))
+    parser.add_argument(
+        "--image2-clean-dir",
+        help="Reviewed GPT Image 2 textless cleanup candidates, using input names",
+    )
     parser.add_argument("--font-catalog", default=str(DEFAULT_CATALOG))
     parser.add_argument("--sample-count", type=_non_negative_int, default=0)
     parser.add_argument("--skip-lama", action="store_true")
@@ -1095,7 +1099,7 @@ def apply_reviewed_page(*, blocks, source_relative, review_rows, font_candidates
         )
         block.reviewed_style_lock = lock
         background_cleanup = row.get("background_cleanup", "lama")
-        if background_cleanup not in {"lama", "flat_inpaint"}:
+        if background_cleanup not in {"lama", "flat_inpaint", "gpt_image_2"}:
             raise ValueError(
                 f"reviewed block {block_id} has unsupported background_cleanup"
             )
@@ -1820,6 +1824,52 @@ def apply_reviewed_background_cleanup(original_path, clean_path, blocks):
         clean[mask > 0] = deterministic[mask > 0]
     Image.fromarray(clean, mode="RGB").save(clean_path)
     return len(selected)
+
+
+def page_cleanup_backend(blocks):
+    """Return one generative cleanup backend per page; flat cleanup may coexist."""
+    methods = {
+        getattr(block, "background_cleanup", "lama")
+        for block in blocks
+        if block.kind != "sfx_keep"
+    }
+    if "lama" in methods and "gpt_image_2" in methods:
+        raise ValueError("a page cannot mix LaMa and GPT Image 2 cleanup")
+    if "gpt_image_2" in methods:
+        return "gpt_image_2"
+    if "lama" in methods:
+        return "lama"
+    return "deterministic_fill"
+
+
+def prepare_non_lama_clean_images(images, clean_dir, image2_clean_dir, block_map):
+    """Stage original or reviewed Image 2 pages without mutating either source."""
+    clean_root = Path(clean_dir)
+    image2_root = Path(image2_clean_dir) if image2_clean_dir else None
+    staged = 0
+    for image_path in images:
+        blocks = block_map.get(image_path.name, [])
+        backend = page_cleanup_backend(blocks)
+        if backend == "lama":
+            continue
+        if backend == "gpt_image_2":
+            if image2_root is None:
+                raise ValueError(
+                    f"GPT Image 2 cleanup is required for {image_path.name}; "
+                    "provide --image2-clean-dir"
+                )
+            source = find_clean(image2_root, image_path)
+            if source is None:
+                raise FileNotFoundError(
+                    f"GPT Image 2 clean image not found: {image_path.name}"
+                )
+        else:
+            source = image_path
+        destination = clean_root / f"{image_path.stem}.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        staged += 1
+    return staged
 
 
 def draw_overlay(src_path, dest_path, blocks, qa_result=None):
@@ -2596,9 +2646,6 @@ def main():
     for folder in (mask_dir, overlay_dir):
         folder.mkdir(parents=True, exist_ok=True)
 
-    if not args.skip_lama and not (lama_root / "venv311" / "Scripts" / "iopaint.exe").exists():
-        raise SystemExit(f"LaMa/IOPaint not found: {lama_root}")
-
     ocr = load_ocr()
     sample_metadata = {}
     precomputed_lines = None
@@ -2679,9 +2726,38 @@ def main():
     for folder in (clean_dir, final_dir, comparison_dir, font_matches_dir):
         folder.mkdir(parents=True, exist_ok=True)
 
-    lama_device = detect_lama_device()
-    print(f"Using LaMa device: {lama_device}")
-    run_lama(lama_root, lama_input_dir, mask_dir, clean_dir, lama_device)
+    try:
+        cleanup_backends = {
+            image.name: page_cleanup_backend(block_map[image.name])
+            for image in images
+        }
+    except ValueError as exc:
+        raise SystemExit(f"Invalid reviewed cleanup routing: {exc}") from exc
+    lama_pages = [
+        page
+        for page in selected_pages
+        if cleanup_backends.get(page.internal_name) == "lama"
+    ]
+    if lama_pages:
+        iopaint = lama_root / "venv311" / "Scripts" / "iopaint.exe"
+        if not iopaint.exists():
+            raise SystemExit(f"LaMa/IOPaint not found: {lama_root}")
+        lama_device = detect_lama_device()
+        print(f"Using LaMa device: {lama_device}")
+        lama_run_input = prepare_selected_input(output_dir, lama_pages)
+        run_lama(lama_root, lama_run_input, mask_dir, clean_dir, lama_device)
+    else:
+        lama_device = "not_required"
+        print("LaMa not required for reviewed cleanup routes")
+    try:
+        prepare_non_lama_clean_images(
+            images,
+            clean_dir,
+            args.image2_clean_dir,
+            block_map,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Reviewed text cleanup candidate unavailable: {exc}") from exc
 
     pairs, redraw_problems, rename_lines = process_redraw_pages(
         images, clean_dir, final_dir, block_map, image_sizes, source_lookup

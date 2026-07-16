@@ -239,6 +239,46 @@ class ContinuityV5SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, documents)
 
+    def test_workbench_modes_and_human_output_review_are_mandatory(self):
+        documents = "\n".join(
+            (read("SKILL.md"), read("references/scene-cluster-pipeline.md"))
+        )
+        for phrase in (
+            "open_comic_review_workbench",
+            "human_visual_auto_text",
+            "automatic",
+            "first output set",
+            "candidate hash changes",
+            "passed pages remain locked",
+            "same relative path, filename, case, and extension",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
+    def test_text_cleanup_has_image2_fallback_but_never_image_typesetting(self):
+        documents = read("SKILL.md") + "\n" + read("references/text-engine.md")
+        for phrase in (
+            "deterministic fill -> LaMa -> GPT Image 2 -> evidence_blocked",
+            "remove text only",
+            "never typeset Chinese",
+            "preserve everything outside the reviewed mask",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
+    def test_hash_cache_reuse_never_skips_required_human_review(self):
+        documents = read("SKILL.md") + "\n" + read("references/scene-cluster-pipeline.md")
+        for phrase in (
+            "hash-bound audit cache",
+            "novel hash",
+            "reference hash",
+            "source page hash",
+            "invalidate",
+            "never caches human approval",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documents)
+
 
 if __name__ == "__main__":
     unittest.main()

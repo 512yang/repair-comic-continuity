@@ -17,6 +17,12 @@ Run production work only inside an isolated run root created by `scripts/prepare
 - Read [qa-checklist.md](references/qa-checklist.md) before candidate review and final validation.
 - Read [text-engine.md](references/text-engine.md) before detecting, removing, rebuilding, rendering, or reviewing ordinary text.
 
+## Codex workbench contract
+
+Open the bundled app through `open_comic_review_workbench`. Let the user choose `human_visual_auto_text` or `automatic` before the first submit; one `submit_review_drafts` action handles both the initial run and later revisions. The embedded text engine, not Codex prose, audits every page's ordinary text in both modes.
+
+Treat workbench drafts as raw user evidence. Codex may normalize them only through `commit_normalized_annotations`; never invent an observed defect, required state, or region. For output review, require the first output set to be reviewed page by page. Bind each decision to the candidate hash: passed pages remain locked, and only pages whose candidate hash changes reopen. Promotion still requires the same relative path, filename, case, and extension as input, with an exact page-count bijection.
+
 ## Immutable pipeline order
 
 1. Inventory naturally sorted, decodable input images and hash the novel, references, and source pages.
@@ -78,7 +84,7 @@ For a redraw, capture all ordinary text first, then generate a full-page textles
 
 Bind every block to page, panel, balloon, speaker, original rectangle or polygon, source text, replacement text, exact novel offsets, and a hash-bound `style_lock`. Preserve the original font or independently reviewed visual equivalent, font asset hash, confidence, fill and stroke colors, font size, stroke width, letter and line spacing, writing mode, alignment, rotation, anchor, line boxes, reading order, balloon style, placement, and density. Never add a new dialogue balloon unless source evidence explicitly requires one.
 
-Use only the embedded engine in `scripts/text_engine_pipeline.py`, `scripts/text_style_contract.py`, `scripts/comic_repair/`, and `assets/text_fonts/`. Do not require or import `D:\漫画文字修复`, another text-repair Skill, or an external font project. LaMa weights may live in the Skill runtime cache or `REPAIR_COMIC_LAMA_ROOT`; missing runtime evidence blocks complex-background cleaning instead of triggering a weak fallback.
+Use only the embedded engine in `scripts/text_engine_pipeline.py`, `scripts/text_style_contract.py`, `scripts/text_cleanup_router.py`, `scripts/comic_repair/`, and `assets/text_fonts/`. Do not require or import `D:\漫画文字修复`, another text-repair Skill, or an external font project. Route cleanup exactly as `deterministic fill -> LaMa -> GPT Image 2 -> evidence_blocked`. GPT Image 2 may remove text only and reconstruct the reviewed mask; it must never typeset Chinese and must preserve everything outside the reviewed mask. Missing safe runtime evidence blocks the page instead of triggering a weak fallback.
 
 Do not silently shrink, reflow, recolor, recenter, rotate, or substitute a font. Keep the original line count and line boxes. If replacement text cannot fit under the locked style and geometry, mark `text_overflow` and route to reviewed layout adjustment; never drop characters or save an overflowed page.
 
@@ -91,6 +97,8 @@ Cluster contiguous story beats by chapter, location, story time, cast state, cos
 Use one coordinator and at most 3 workers. Each worker holds one durable lease and writes only to its isolated candidate directory. Use a single writer for evidence and final promotion. A generator cannot approve its own candidate. The coordinator may run independent audit and review work in parallel, but never uses parallelism to bypass gates.
 
 Only pages with confirmed visual defects enter image generation. Correct pages still receive the text checks required by the active mode but do not consume a generation call.
+
+Build and verify the hash-bound audit cache with `scripts/audit_cache.py` only when the pipeline version, mode, novel hash, reference hash set, source page hash, cluster membership, and relevant reviewed-rule hashes all match. Any mismatch must invalidate the affected cache entry. Cache machine-derived alignment, OCR proposals, crops, and unchanged evidence; it never caches human approval, candidate approval, release receipts, or a stale visual decision.
 
 Run `python scripts/validate_appearance_matrix.py evidence/character_appearance_matrix.json` before classifying any page. A missing character page, missing identity reference, non-full-resolution observation, `not_visible` trait on a visible character, or unexplained trait drift blocks confirmation. A source matrix may use `defects_confirmed` only when two independent full-resolution reviewers agree, every drift trait has a hash-bound `confirmed_defect` review, and the affected page is eligible for `full_page_redraw` classification. This state authorizes a repair task, not release: release still requires a `confirmed` appearance matrix with every repaired trait matching. Do not excuse a same-scene skin-tone category change as lighting without explicit full-resolution evidence. Reject generated candidates that reintroduce a drift already recorded in the matrix.
 

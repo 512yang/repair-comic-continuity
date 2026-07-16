@@ -14,7 +14,7 @@ class ReleaseVersionContractTests(unittest.TestCase):
         self.assertIn('EVIDENCE_PIPELINE_ID = "continuity_v4"', version)
         self.assertIn('EVIDENCE_SCHEMA_VERSION = "4.0"', version)
         self.assertIn(
-            'RELEASE_CERTIFICATE_ID = "continuity-v5.5-signed-20260716"',
+            'RELEASE_CERTIFICATE_ID = "continuity-v5.6-workbench-signed-20260716"',
             version,
         )
 
@@ -41,6 +41,8 @@ class ReleaseVersionContractTests(unittest.TestCase):
             '"scripts/prompt_compiler.py"',
             certificate_validator,
         )
+        self.assertIn('"scripts/audit_cache.py"', certificate_validator)
+        self.assertIn('"scripts/text_cleanup_router.py"', certificate_validator)
 
         builder = (ROOT / "scripts" / "build_output_manifest.py").read_text(encoding="utf-8")
         validator = (ROOT / "scripts" / "validate_output.py").read_text(encoding="utf-8")
@@ -54,6 +56,7 @@ class ReleaseVersionContractTests(unittest.TestCase):
         metadata = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("continuity_v5_unified", metadata)
+        self.assertIn("漫画连续性修复 V5.6", metadata)
         self.assertIn("continuity_v5_unified", skill)
 
 
