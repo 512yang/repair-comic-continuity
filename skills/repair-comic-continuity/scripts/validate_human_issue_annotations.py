@@ -41,7 +41,11 @@ ANNOTATION_KEYS = frozenset(
 )
 REQUIRED_ANNOTATION_KEYS = ANNOTATION_KEYS - {"trait_codes"}
 PAGE_KEYS = frozenset({"path", "sha256"})
-REGION_KEYS = frozenset({"region_id", "bbox_norm", "description"})
+REGION_REQUIRED_KEYS = frozenset({"region_id", "bbox_norm", "description"})
+REGION_KEYS = REGION_REQUIRED_KEYS | frozenset(
+    {"shape_kind", "polygon_norm", "freehand_norm"}
+)
+SHAPE_KINDS = frozenset({"rectangle", "polygon", "freehand", "full_page"})
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 
@@ -101,6 +105,87 @@ def _bbox(value: object, field: str) -> list[float]:
     if left >= right or top >= bottom:
         raise ValueError(f"{field} bbox_norm must have positive area")
     return result
+
+
+def _point_path(
+    value: object,
+    field: str,
+    *,
+    minimum_points: int,
+) -> list[list[float]]:
+    if not isinstance(value, list) or len(value) < minimum_points:
+        raise ValueError(f"{field} must contain at least {minimum_points} points")
+    result: list[list[float]] = []
+    for index, point in enumerate(value):
+        if not isinstance(point, list) or len(point) != 2:
+            raise ValueError(f"{field}[{index}] must contain two numbers")
+        normalized: list[float] = []
+        for number in point:
+            if isinstance(number, bool) or not isinstance(number, (int, float)):
+                raise ValueError(f"{field}[{index}] must contain two numbers")
+            coordinate = float(number)
+            if not math.isfinite(coordinate) or coordinate < 0.0 or coordinate > 1.0:
+                raise ValueError(f"{field} points must remain within [0, 1]")
+            normalized.append(coordinate)
+        result.append(normalized)
+    left = min(point[0] for point in result)
+    top = min(point[1] for point in result)
+    right = max(point[0] for point in result)
+    bottom = max(point[1] for point in result)
+    if left >= right or top >= bottom:
+        raise ValueError(f"{field} must have positive area")
+    return result
+
+
+def _extended_geometry(
+    region: dict[str, Any],
+    field: str,
+    bbox: list[float],
+) -> dict[str, Any]:
+    shape_kind = region.get("shape_kind")
+    polygon = region.get("polygon_norm")
+    freehand = region.get("freehand_norm")
+    if shape_kind is None:
+        if polygon is not None or freehand is not None:
+            raise ValueError(f"{field}.shape_kind is required for path geometry")
+        return {}
+    if not isinstance(shape_kind, str) or shape_kind not in SHAPE_KINDS:
+        raise ValueError(f"{field}.shape_kind is unsupported")
+    if shape_kind == "polygon":
+        if freehand is not None or polygon is None:
+            raise ValueError(f"{field}.polygon_norm is required for polygon geometry")
+        points = _point_path(
+            polygon, f"{field}.polygon_norm", minimum_points=3
+        )
+        key = "polygon_norm"
+    elif shape_kind == "freehand":
+        if polygon is not None or freehand is None:
+            raise ValueError(f"{field}.freehand_norm is required for freehand geometry")
+        points = _point_path(
+            freehand, f"{field}.freehand_norm", minimum_points=2
+        )
+        key = "freehand_norm"
+    else:
+        if polygon is not None or freehand is not None:
+            raise ValueError(f"{field}.{shape_kind} cannot contain path geometry")
+        if shape_kind == "full_page" and any(
+            not math.isclose(actual, expected, abs_tol=1e-6)
+            for actual, expected in zip(bbox, [0.0, 0.0, 1.0, 1.0])
+        ):
+            raise ValueError(f"{field}.full_page bbox_norm must cover the whole page")
+        return {"shape_kind": shape_kind}
+    derived = [
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    ]
+    if any(
+        not math.isclose(actual, expected, abs_tol=1e-6)
+        for actual, expected in zip(derived, bbox)
+    ):
+        raise ValueError(f"{field} derived bounding box does not match bbox_norm")
+    return {"shape_kind": shape_kind, key: points}
 
 
 def validate_human_issue_annotations(
@@ -174,21 +259,28 @@ def validate_human_issue_annotations(
         normalized_regions: list[dict[str, Any]] = []
         for region_index, region in enumerate(regions):
             region_field = f"{field}.regions[{region_index}]"
-            if not isinstance(region, dict) or set(region) != REGION_KEYS:
+            if (
+                not isinstance(region, dict)
+                or not REGION_REQUIRED_KEYS.issubset(region)
+                or not set(region).issubset(REGION_KEYS)
+            ):
                 raise ValueError(f"{region_field} must contain exact keys")
             region_id = _text(region.get("region_id"), f"{region_field}.region_id")
             if region_id in seen_regions:
                 raise ValueError(f"duplicate region_id in {annotation_id}: {region_id}")
             seen_regions.add(region_id)
-            normalized_regions.append(
-                {
-                    "region_id": region_id,
-                    "bbox_norm": _bbox(region.get("bbox_norm"), region_field),
-                    "description": _text(
-                        region.get("description"), f"{region_field}.description"
-                    ),
-                }
+            normalized_bbox = _bbox(region.get("bbox_norm"), region_field)
+            normalized_region = {
+                "region_id": region_id,
+                "bbox_norm": normalized_bbox,
+                "description": _text(
+                    region.get("description"), f"{region_field}.description"
+                ),
+            }
+            normalized_region.update(
+                _extended_geometry(region, region_field, normalized_bbox)
             )
+            normalized_regions.append(normalized_region)
 
         targets = row.get("targets")
         if not isinstance(targets, list) or not targets:

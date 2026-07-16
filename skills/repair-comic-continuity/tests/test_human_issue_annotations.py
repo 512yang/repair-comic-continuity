@@ -176,6 +176,62 @@ class HumanIssueAnnotationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "bbox_norm"):
                     self.validate(document)
 
+    def test_accepts_polygon_freehand_and_full_page_geometry(self):
+        document = self.manifest()
+        document["annotations"][0]["regions"] = [
+            {
+                "region_id": "face-polygon",
+                "bbox_norm": [0.10, 0.10, 0.30, 0.40],
+                "description": "face contour",
+                "shape_kind": "polygon",
+                "polygon_norm": [[0.10, 0.10], [0.30, 0.16], [0.25, 0.40]],
+            },
+            {
+                "region_id": "hair-freehand",
+                "bbox_norm": [0.20, 0.05, 0.50, 0.30],
+                "description": "hair outline",
+                "shape_kind": "freehand",
+                "freehand_norm": [[0.20, 0.05], [0.35, 0.12], [0.50, 0.30]],
+            },
+            {
+                "region_id": "whole-page",
+                "bbox_norm": [0.0, 0.0, 1.0, 1.0],
+                "description": "whole page style drift",
+                "shape_kind": "full_page",
+            },
+        ]
+        result = self.validate(document)
+        regions = result["annotations"][0]["regions"]
+        self.assertEqual(regions[0]["shape_kind"], "polygon")
+        self.assertEqual(regions[0]["polygon_norm"][1], [0.30, 0.16])
+        self.assertEqual(regions[1]["shape_kind"], "freehand")
+        self.assertEqual(regions[2]["bbox_norm"], [0.0, 0.0, 1.0, 1.0])
+
+    def test_rejects_extended_geometry_outside_bounds_or_bbox_mismatch(self):
+        outside = self.manifest()
+        outside["annotations"][0]["regions"][0].update({
+            "shape_kind": "polygon",
+            "polygon_norm": [[0.25, 0.10], [1.10, 0.20], [0.60, 0.48]],
+        })
+        with self.assertRaisesRegex(ValueError, "within \\[0, 1\\]"):
+            self.validate(outside)
+
+        mismatch = self.manifest()
+        mismatch["annotations"][0]["regions"][0].update({
+            "shape_kind": "polygon",
+            "polygon_norm": [[0.25, 0.10], [0.50, 0.20], [0.60, 0.40]],
+        })
+        with self.assertRaisesRegex(ValueError, "derived bounding box"):
+            self.validate(mismatch)
+
+        wrong_path = self.manifest()
+        wrong_path["annotations"][0]["regions"][0].update({
+            "shape_kind": "freehand",
+            "polygon_norm": [[0.25, 0.10], [0.60, 0.48], [0.40, 0.30]],
+        })
+        with self.assertRaisesRegex(ValueError, "freehand_norm"):
+            self.validate(wrong_path)
+
 
 if __name__ == "__main__":
     unittest.main()

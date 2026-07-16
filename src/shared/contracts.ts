@@ -30,3 +30,28 @@ export interface SubmitContext {
   running: boolean;
   blockers: string[];
 }
+
+export type AnnotationShapeKind =
+  | "rectangle"
+  | "polygon"
+  | "freehand"
+  | "full_page";
+
+export type Point = readonly [number, number];
+
+export interface RawAnnotationShape {
+  kind: AnnotationShapeKind;
+  points: readonly Point[];
+}
+
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+export interface NormalizedAnnotationShape {
+  shape_kind: AnnotationShapeKind;
+  bbox_norm: [number, number, number, number];
+  polygon_norm?: Point[];
+  freehand_norm?: Point[];
+}
