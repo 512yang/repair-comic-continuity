@@ -252,6 +252,7 @@ def base_style_lock(*, bbox=(100, 120, 420, 330), line_box=(100, 120, 420, 170))
         "stroke_width_px": 0.0,
         "letter_spacing_px": 0.0,
         "line_spacing_px": 6.0,
+        "horizontal_scale": 1.0,
         "writing_mode": "horizontal-tb",
         "alignment": "left",
         "rotation_deg": 0.0,

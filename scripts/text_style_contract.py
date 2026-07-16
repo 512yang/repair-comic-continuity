@@ -109,6 +109,7 @@ def style_lock_from_measurements(
         "stroke_width_px": stroke_width,
         "letter_spacing_px": float(getattr(style, "char_gap", 0.0)),
         "line_spacing_px": float(getattr(style, "line_gap", 0.0)),
+        "horizontal_scale": float(getattr(style, "width_ratio", 1.0)),
         "writing_mode": "horizontal-tb" if orientation == "horizontal" else "vertical-rl",
         "alignment": alignment,
         "rotation_deg": float(rotation_deg),

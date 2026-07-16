@@ -96,6 +96,7 @@ _STYLE_LOCK_KEYS = frozenset(
         "stroke_width_px",
         "letter_spacing_px",
         "line_spacing_px",
+        "horizontal_scale",
         "writing_mode",
         "alignment",
         "rotation_deg",

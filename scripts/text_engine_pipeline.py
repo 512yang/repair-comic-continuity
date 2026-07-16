@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,8 @@ from comic_repair.qa import (
     write_font_match_report,
 )
 from comic_repair.style_analysis import TextStyle, analyze_text_style
+from pipeline_contracts import canonical_hash
+from text_style_contract import StyleEvidenceBlocked, style_lock_from_measurements
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -120,6 +123,10 @@ class TextBlock:
     warnings: list[str] = field(default_factory=list)
     style: TextStyle | None = None
     font_match: FontMatch | None = None
+    block_id: str | None = None
+    reviewed_style_lock: dict | None = None
+    reviewed_lines: list[str] | None = None
+    background_cleanup: str = "lama"
 
 
 @dataclass(frozen=True)
@@ -153,6 +160,8 @@ GENERATED_DIRECTORIES = (
 GENERATED_REPORTS = (
     "run_report.json", "运行报告.md", "exception_report.json",
     "exception_report.md", "sample_selection.json", "source_map.json",
+    "analysis_manifest.json", "style_gate_report.json",
+    "layout_preflight.json",
 )
 SAMPLE_ROLES = {
     "dialogue", "narration", "black_caption", "vertical_text", "sfx_keep", "sfx",
@@ -191,6 +200,14 @@ def build_parser(script_dir=None):
     source.add_argument("--input")
     parser.add_argument("--output", default=str(root / "输出" / "字体匹配测试_v3"))
     parser.add_argument("--source", default=str(root / "小说.txt"))
+    parser.add_argument(
+        "--alignment",
+        help="Confirmed novel_alignment.json used for page-scoped text repair",
+    )
+    parser.add_argument(
+        "--reviewed-manifest",
+        help="Confirmed reviewed text/style manifest required before rendering",
+    )
     parser.add_argument("--lama-root", default=str(discover_lama_root()))
     parser.add_argument("--font-catalog", default=str(DEFAULT_CATALOG))
     parser.add_argument("--sample-count", type=_non_negative_int, default=0)
@@ -924,6 +941,230 @@ def make_source_matcher(source_units):
     return match
 
 
+def _normalized_source_offsets(text):
+    normalized = []
+    offsets = []
+    for index, char in enumerate(text):
+        if normalize_for_match(char):
+            normalized.append(char)
+            offsets.append(index)
+    return "".join(normalized), offsets
+
+
+def make_page_source_matcher(source_text):
+    """Match ordered OCR blocks inside one confirmed page-level novel excerpt."""
+    normalized_source, offsets = _normalized_source_offsets(source_text)
+    state = {"cursor": 0}
+
+    def match(ocr_text):
+        clean_ocr = normalize_for_match(ocr_text)
+        if not clean_ocr or not normalized_source:
+            return None
+        target_length = len(clean_ocr)
+        minimum = max(1, int(target_length * 0.65))
+        maximum = min(len(normalized_source), int(target_length * 1.35) + 6)
+        search_start = max(0, state["cursor"] - 24)
+        best = None
+        for start in range(search_start, len(normalized_source) - minimum + 1):
+            for length in range(minimum, maximum + 1):
+                end = start + length
+                if end > len(normalized_source):
+                    break
+                candidate = normalized_source[start:end]
+                score = SequenceMatcher(None, clean_ocr, candidate).ratio()
+                rank = (score, -abs(length - target_length), -start)
+                if best is None or rank > best["rank"]:
+                    original_start = offsets[start]
+                    original_end = offsets[end - 1] + 1
+                    best = {
+                        "text": source_text[original_start:original_end],
+                        "score": score,
+                        "start": start,
+                        "end": end,
+                        "rank": rank,
+                    }
+        if best is None or best["score"] < 0.72:
+            return None
+        state["cursor"] = best["end"]
+        return {key: value for key, value in best.items() if key != "rank"}
+
+    return match
+
+
+def stable_text_block_id(source_relative, block):
+    body = {
+        "source_relative": final_relative_output_name(source_relative),
+        "box": list(block.box),
+        "line_boxes": [list(line.box) for line in block.lines],
+        "original_text": block.original_text,
+    }
+    digest = hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"text-{digest[:20]}"
+
+
+def apply_reviewed_page(*, blocks, source_relative, review_rows, font_candidates):
+    """Apply a complete reviewed block manifest; missing or stale rows block rendering."""
+    from prompt_compiler import _normalize_style_lock
+
+    if not isinstance(review_rows, list):
+        raise ValueError("reviewed page blocks must be a list")
+    block_lookup = {block.block_id: block for block in blocks}
+    row_lookup = {
+        row.get("block_id"): row
+        for row in review_rows
+        if isinstance(row, dict) and isinstance(row.get("block_id"), str)
+    }
+    if set(row_lookup) != set(block_lookup):
+        raise ValueError(f"reviewed block set does not match live analysis for {source_relative}")
+    candidate_rows = []
+    for candidate in font_candidates:
+        candidate_rows.append((
+            candidate,
+            hashlib.sha256(Path(candidate.path).read_bytes()).hexdigest(),
+        ))
+    for block_id, block in block_lookup.items():
+        row = row_lookup[block_id]
+        action = row.get("action")
+        if action == "preserve":
+            block.kind = "sfx_keep"
+            block.rewrite_text = block.original_text
+            block.reviewed_style_lock = None
+            block.background_cleanup = "preserve"
+            continue
+        if action != "replace":
+            raise ValueError(f"reviewed block {block_id} has unsupported action")
+        replacement = row.get("replacement_text")
+        if not isinstance(replacement, str) or not replacement.strip():
+            raise ValueError(f"reviewed block {block_id} replacement_text is missing")
+        orientation = "vertical" if block.orientation == "vertical" else "horizontal"
+        canvas = {
+            "width": max(block.box[2], *(line.box[2] for line in block.lines)),
+            "height": max(block.box[3], *(line.box[3] for line in block.lines)),
+        }
+        lock = _normalize_style_lock(
+            row.get("style_lock"), name=f"reviewed block {block_id}.style_lock",
+            canvas=canvas, block_bbox=list(block.box), orientation=orientation,
+        )
+        requested_weight = row.get("font_weight")
+        if not isinstance(requested_weight, int) or isinstance(requested_weight, bool):
+            raise ValueError(f"reviewed block {block_id} font_weight is missing")
+        matches = [
+            candidate for candidate, digest in candidate_rows
+            if digest == lock["font"]["asset_sha256"]
+            and candidate.family == lock["font"]["family"]
+            and candidate.weight == requested_weight
+        ]
+        if not matches:
+            raise ValueError(f"reviewed block {block_id} font asset or weight is unavailable")
+        font = matches[0]
+        block.rewrite_text = replacement.strip()
+        replacement_lines = row.get("replacement_lines")
+        if replacement_lines is not None:
+            if (
+                not isinstance(replacement_lines, list)
+                or not replacement_lines
+                or any(not isinstance(line, str) or not line for line in replacement_lines)
+            ):
+                raise ValueError(f"reviewed block {block_id} replacement_lines are invalid")
+            if len(replacement_lines) != len(lock["line_boxes"]):
+                raise ValueError(f"reviewed block {block_id} line count changed")
+            if normalize_for_match("".join(replacement_lines)) != normalize_for_match(replacement):
+                raise ValueError(f"reviewed block {block_id} replacement_lines mismatch text")
+            block.reviewed_lines = list(replacement_lines)
+        else:
+            block.reviewed_lines = None
+        block.orientation = "vertical" if lock["writing_mode"].startswith("vertical") else "horizontal"
+        block.fill = tuple(lock["fill_rgba"][:3])
+        block.style = TextStyle(
+            fill=tuple(lock["fill_rgba"][:3]),
+            orientation=block.orientation,
+            font_size=lock["font_size_px"],
+            weight_score=requested_weight / 1000.0,
+            width_ratio=lock["horizontal_scale"],
+            char_gap=lock["letter_spacing_px"],
+            line_gap=lock["line_spacing_px"],
+            stroke_width=lock["stroke_width_px"],
+            category_scores={}, confidence=1.0, warnings=[],
+        )
+        block.font_match = FontMatch(
+            family=font.family, path=Path(font.path), weight=font.weight,
+            score=1.0, confidence=1.0, fallback_used=False,
+            top_candidates=[], warnings=[],
+        )
+        block.reviewed_style_lock = lock
+        background_cleanup = row.get("background_cleanup", "lama")
+        if background_cleanup not in {"lama", "flat_inpaint"}:
+            raise ValueError(
+                f"reviewed block {block_id} has unsupported background_cleanup"
+            )
+        block.background_cleanup = background_cleanup
+        block.warnings = [
+            warning for warning in block.warnings
+            if warning not in {
+                "style_low_confidence", "font_match_low_confidence",
+                "font_match_line_fallback", "source_match_low_confidence",
+                "source_match_too_long_kept_ocr",
+            }
+        ]
+
+
+def load_confirmed_page_matchers(alignment_path, pages):
+    """Bind every staged page to its independently confirmed novel context."""
+    payload = json.loads(Path(alignment_path).read_text(encoding="utf-8-sig"))
+    if payload.get("status") != "confirmed":
+        raise ValueError("page-scoped alignment must have confirmed status")
+    rows = payload.get("pages")
+    if not isinstance(rows, list):
+        raise ValueError("confirmed alignment pages are missing")
+    lookup = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("status") != "confirmed":
+            raise ValueError("every page-scoped alignment row must be confirmed")
+        name = row.get("output_name")
+        source_text = row.get("context_excerpt") or row.get("source_excerpt")
+        if not isinstance(name, str) or not isinstance(source_text, str) or not source_text.strip():
+            raise ValueError("confirmed alignment row is missing output_name or source text")
+        lookup[name] = source_text
+    matchers = {}
+    for page in pages:
+        if page.source_relative not in lookup:
+            raise ValueError(f"confirmed alignment is missing {page.source_relative}")
+        matchers[page.internal_name] = make_page_source_matcher(lookup[page.source_relative])
+    return matchers
+
+
+def load_confirmed_review_pages(review_path, pages):
+    """Load hash-bound reviewed text/style decisions for every selected source page."""
+    payload = json.loads(Path(review_path).read_text(encoding="utf-8-sig"))
+    if payload.get("status") != "confirmed":
+        raise ValueError("reviewed manifest must have confirmed status")
+    rows = payload.get("pages")
+    if not isinstance(rows, list):
+        raise ValueError("reviewed manifest pages are missing")
+    lookup = {
+        row.get("source_relative"): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("source_relative"), str)
+    }
+    result = {}
+    for page in pages:
+        row = lookup.get(page.source_relative)
+        if row is None:
+            raise ValueError(f"reviewed manifest is missing {page.source_relative}")
+        expected_hash = row.get("source_sha256")
+        live_hash = hashlib.sha256(page.internal_path.read_bytes()).hexdigest()
+        if expected_hash != live_hash:
+            raise ValueError(f"reviewed manifest source hash drift for {page.source_relative}")
+        if not isinstance(row.get("blocks"), list):
+            raise ValueError(f"reviewed manifest blocks are missing for {page.source_relative}")
+        result[page.internal_name] = row["blocks"]
+    if set(lookup) != {page.source_relative for page in pages}:
+        raise ValueError("reviewed manifest page set does not match selected input")
+    return result
+
+
 def analyze_image(
     ocr, image_path, source_matcher, font_candidates=None, precomputed_lines=None,
 ):
@@ -1179,33 +1420,33 @@ def _inside(box, outer):
     )
 
 
-def _shape_horizontal_line(font, text, char_gap, stroke):
+def _shape_horizontal_line(font, text, char_gap, stroke, horizontal_scale=1.0):
     cursor = 0.0
     glyphs = []
     for original in text:
         rendered = original
         bbox = _glyph_bbox(font, rendered, stroke)
         raw_box = (
-            int(np.floor(cursor + bbox[0])), bbox[1],
-            int(np.ceil(cursor + bbox[2])), bbox[3],
+            int(np.floor(cursor + bbox[0] * horizontal_scale)), bbox[1],
+            int(np.ceil(cursor + bbox[2] * horizontal_scale)), bbox[3],
         )
         glyphs.append({
             "original": original, "rendered": rendered,
             "raw_box": raw_box, "raw_draw": (cursor, 0.0),
         })
-        cursor += float(font.getlength(rendered)) + char_gap
+        cursor += float(font.getlength(rendered)) * horizontal_scale + char_gap
     bounds = _union_or_zero([item["raw_box"] for item in glyphs])
     return glyphs, bounds
 
 
-def _shape_vertical_column(font, text, char_gap, stroke):
+def _shape_vertical_column(font, text, char_gap, stroke, horizontal_scale=1.0):
     cursor = 0
     glyphs = []
     max_width = 0
     for original in text:
         rendered = VERTICAL_GLYPHS.get(original, original)
         bbox = _glyph_bbox(font, rendered, stroke)
-        width = max(1, bbox[2] - bbox[0])
+        width = max(1, int(round((bbox[2] - bbox[0]) * horizontal_scale)))
         height = max(1, bbox[3] - bbox[1])
         glyphs.append({
             "original": original, "rendered": rendered, "font_box": bbox,
@@ -1226,17 +1467,52 @@ def _horizontal_candidate(block, style, size, font, stroke):
     char_gap = max(-size // 4, int(style.char_gap))
     line_gap = max(0, int(style.line_gap))
     line_count = original_lines
-    lines = _split_by_ratios(text, lengths, line_count)
-    shaped = [_shape_horizontal_line(font, line, char_gap, stroke) for line in lines]
+    reviewed_lock = getattr(block, "reviewed_style_lock", None) or {}
+    reviewed_lines = getattr(block, "reviewed_lines", None)
+    lines = (
+        list(reviewed_lines)
+        if reviewed_lines is not None
+        else _split_by_ratios(text, lengths, line_count)
+    )
+    horizontal_scale = float(
+        (getattr(block, "reviewed_style_lock", None) or {}).get(
+            "horizontal_scale", getattr(style, "width_ratio", 1.0)
+        )
+    )
+    shaped = [
+        _shape_horizontal_line(font, line, char_gap, stroke, horizontal_scale)
+        for line in lines
+    ]
     widths = [bounds[2] - bounds[0] for _glyphs, bounds in shaped]
     heights = [bounds[3] - bounds[1] for _glyphs, bounds in shaped]
     total_height = sum(heights) + line_gap * max(0, len(lines) - 1)
-    fits = bool(width > 0 and height > 0 and max(widths or [0]) <= width and total_height <= height)
+    target_line_boxes = reviewed_lock.get("line_boxes")
+    if target_line_boxes and len(target_line_boxes) == len(lines):
+        fits = bool(width > 0 and height > 0) and all(
+            line_width <= target[2] - target[0]
+            and line_height <= target[3] - target[1]
+            for line_width, line_height, target in zip(widths, heights, target_line_boxes)
+        )
+    else:
+        fits = bool(width > 0 and height > 0 and max(widths or [0]) <= width and total_height <= height)
     top = y1 + max(0, (height - min(height, total_height)) // 2)
     glyphs, boxes = [], []
     y = top
-    for (raw_glyphs, bounds), line_width, line_height in zip(shaped, widths, heights):
-        left = x1 + max(0, (width - min(width, line_width)) // 2)
+    for index, ((raw_glyphs, bounds), line_width, line_height) in enumerate(
+        zip(shaped, widths, heights)
+    ):
+        if target_line_boxes and len(target_line_boxes) == len(lines):
+            target = target_line_boxes[index]
+            alignment = reviewed_lock.get("alignment", "left")
+            if alignment == "right":
+                left = target[2] - line_width
+            elif alignment == "center":
+                left = target[0] + max(0, (target[2] - target[0] - line_width) // 2)
+            else:
+                left = target[0]
+            y = target[1]
+        else:
+            left = x1 + max(0, (width - min(width, line_width)) // 2)
         shift_x = left - bounds[0]
         shift_y = y - bounds[1]
         absolute_boxes = []
@@ -1256,7 +1532,8 @@ def _horizontal_candidate(block, style, size, font, stroke):
         if not absolute_boxes:
             line_box = (left, y, left, y)
         boxes.append(_clamp_box(line_box, block.box))
-        y += line_height + line_gap
+        if not target_line_boxes or len(target_line_boxes) != len(lines):
+            y += line_height + line_gap
     drawn_count = sum(_inside(item["box"], block.box) for item in glyphs)
     return {
         "fits": fits, "lines": lines, "line_boxes": boxes,
@@ -1275,11 +1552,22 @@ def _vertical_candidate(block, style, size, font, stroke):
     line_gap = max(0, int(style.line_gap))
     col_count = original_cols
     cols = _split_by_ratios(text, lengths, col_count)
-    shaped = [_shape_vertical_column(font, col, char_gap, stroke) for col in cols]
+    horizontal_scale = float(
+        (getattr(block, "reviewed_style_lock", None) or {}).get(
+            "horizontal_scale", getattr(style, "width_ratio", 1.0)
+        )
+    )
+    shaped = [
+        _shape_vertical_column(font, col, char_gap, stroke, horizontal_scale)
+        for col in cols
+    ]
     while col_count < max(1, len(text)) and any(item[2] > height for item in shaped):
         col_count += 1
         cols = _split_by_ratios(text, [1] * col_count, col_count)
-        shaped = [_shape_vertical_column(font, col, char_gap, stroke) for col in cols]
+        shaped = [
+            _shape_vertical_column(font, col, char_gap, stroke, horizontal_scale)
+            for col in cols
+        ]
     total_width = sum(item[1] for item in shaped) + line_gap * max(0, len(cols) - 1)
     fits = bool(width > 0 and height > 0 and total_width <= width and max([item[2] for item in shaped] or [0]) <= height)
     right = x2 - max(0, (width - min(width, total_width)) // 2)
@@ -1330,7 +1618,9 @@ def layout_text_block(block):
     selected = None
     font_warnings = []
     actual_match = match
-    for size in range(start_size, 7, -1):
+    reviewed_style_lock = getattr(block, "reviewed_style_lock", None)
+    sizes = [start_size] if reviewed_style_lock else range(start_size, 7, -1)
+    for size in sizes:
         font, warnings, actual_match = _get_font_and_match(size, match, role)
         font_warnings.extend(warnings)
         candidate = (
@@ -1373,6 +1663,54 @@ def layout_text_block(block):
     }
 
 
+def write_layout_preflight(output_dir, block_map, source_lookup):
+    """Prove reviewed text fits at the locked size before running LaMa."""
+    pages = []
+    overflow_block_count = 0
+    for internal_name, blocks in block_map.items():
+        page_blocks = []
+        for block in blocks:
+            if block.kind == "sfx_keep":
+                continue
+            layout = layout_text_block(block)
+            overflow_block_count += int(bool(layout["overflow"]))
+            page_blocks.append({
+                "block_id": block.block_id,
+                "box": list(block.box),
+                "font_path": layout["font_path"],
+                "font_weight": layout["font_weight"],
+                "font_size": layout["font_size"],
+                "line_boxes": layout["line_boxes"],
+                "lines": layout["lines"],
+                "input_char_count": layout["input_char_count"],
+                "drawn_char_count": layout["drawn_char_count"],
+                "overflow": layout["overflow"],
+                "warnings": layout["warnings"],
+            })
+        source_relative = (
+            source_lookup[internal_name].source_relative
+            if internal_name in source_lookup
+            else internal_name
+        )
+        pages.append({
+            "internal_name": internal_name,
+            "source_relative": source_relative,
+            "blocks": page_blocks,
+        })
+    report = {
+        "status": "passed" if overflow_block_count == 0 else "evidence_blocked",
+        "page_count": len(pages),
+        "overflow_block_count": overflow_block_count,
+        "pages": pages,
+    }
+    output_dir = Path(output_dir)
+    (output_dir / "layout_preflight.json").write_text(
+        json.dumps(_stringify_paths(report), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return report
+
+
 def draw_text_block(image, block, layout=None):
     layout = layout or layout_text_block(block)
     if layout["skipped"]:
@@ -1387,6 +1725,35 @@ def draw_text_block(image, block, layout=None):
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(image.width, x2), min(image.height, y2)
     if x2 <= x1 or y2 <= y1:
+        return layout
+    reviewed_style_lock = getattr(block, "reviewed_style_lock", None)
+    if reviewed_style_lock:
+        fill_rgba = reviewed_style_lock.get("fill_rgba", [*block.style.fill, 255])
+        stroke_rgba = reviewed_style_lock.get("stroke_rgba", [0, 0, 0, 0])
+        fill = tuple(int(value) for value in fill_rgba[:3])
+        stroke_fill = (
+            tuple(int(value) for value in stroke_rgba[:3])
+            if int(stroke_rgba[3]) > 0
+            else fill
+        )
+        for glyph in layout["_glyphs"]:
+            font = layout["_font"]
+            stroke = layout["stroke_width"]
+            natural = font.getbbox(glyph["rendered"], stroke_width=stroke, anchor="lt")
+            natural_width = max(1, natural[2] - natural[0])
+            natural_height = max(1, natural[3] - natural[1])
+            tile = Image.new("RGBA", (natural_width, natural_height), (0, 0, 0, 0))
+            tile_draw = ImageDraw.Draw(tile)
+            tile_draw.text(
+                (-natural[0], -natural[1]), glyph["rendered"], font=font,
+                fill=(*fill, 255), stroke_width=stroke,
+                stroke_fill=(*stroke_fill, 255), anchor="lt",
+            )
+            gx1, gy1, gx2, gy2 = glyph["box"]
+            target_size = (max(1, gx2 - gx1), max(1, gy2 - gy1))
+            if tile.size != target_size:
+                tile = tile.resize(target_size, Image.Resampling.LANCZOS)
+            image.paste(tile, (gx1, gy1), tile)
         return layout
     mask = Image.new("L", (x2 - x1, y2 - y1), 0)
     mask_draw = ImageDraw.Draw(mask)
@@ -1430,6 +1797,29 @@ def redraw_clean(clean_path, dest_path, blocks, expected_size=None):
     for block, layout in zip(renderable, layouts):
         draw_text_block(image, block, layout)
     image.save(dest_path, quality=95)
+
+
+def apply_reviewed_background_cleanup(original_path, clean_path, blocks):
+    """Replace only reviewed flat-background masks with deterministic inpainting."""
+    selected = [
+        block for block in blocks
+        if getattr(block, "background_cleanup", "lama") == "flat_inpaint"
+        and block.kind != "sfx_keep"
+    ]
+    if not selected:
+        return 0
+    original = np.asarray(Image.open(original_path).convert("RGB"), dtype=np.uint8)
+    clean = np.asarray(Image.open(clean_path).convert("RGB"), dtype=np.uint8).copy()
+    if original.shape != clean.shape:
+        raise ValueError("original and LaMa clean image sizes differ")
+    for block in selected:
+        mask = np.asarray(make_mask(
+            (original.shape[1], original.shape[0]), [block]
+        ), dtype=np.uint8)
+        deterministic = cv2.inpaint(original, mask, 5, cv2.INPAINT_TELEA)
+        clean[mask > 0] = deterministic[mask > 0]
+    Image.fromarray(clean, mode="RGB").save(clean_path)
+    return len(selected)
 
 
 def draw_overlay(src_path, dest_path, blocks, qa_result=None):
@@ -1814,19 +2204,100 @@ def block_to_json(block):
             ],
             "warnings": block.font_match.warnings,
         }
+    line_boxes = [list(line.box) for line in block.lines]
+    style_lock = None
+    if block.reviewed_style_lock:
+        style_lock = block.reviewed_style_lock
+        style_gate = {"status": "ready", "reason": "reviewed manifest"}
+    elif block.kind == "sfx_keep":
+        style_gate = {
+            "status": "not_applicable",
+            "reason": "reviewed art text or sound effect is preserved",
+        }
+    else:
+        try:
+            style_lock = style_lock_from_measurements(
+                block.style,
+                block.font_match,
+                bbox=block.box,
+                line_boxes=line_boxes,
+                alignment="left",
+            )
+            style_gate = {"status": "ready", "reason": ""}
+        except (StyleEvidenceBlocked, TypeError, ValueError) as exc:
+            style_gate = {"status": "evidence_blocked", "reason": str(exc)}
     return {
+        "block_id": block.block_id,
         "box": block.box,
+        "line_boxes": line_boxes,
         "kind": block.kind,
         "orientation": block.orientation,
         "original_text": block.original_text,
         "rewrite_text": block.rewrite_text,
+        "background_cleanup": block.background_cleanup,
         "confidence": round(block.confidence, 4),
         "fill": block.fill,
         "source_match": block.source_match,
         "warnings": block.warnings,
         "style": style,
         "font_match": font_match_payload,
+        "style_lock": style_lock,
+        "style_gate": style_gate,
     }
+
+
+def write_analysis_artifacts(output_dir, manifest, problems):
+    """Persist dry-run analysis and a machine-enforced style gate summary."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    blocked_pages = []
+    ready_block_count = 0
+    blocked_block_count = 0
+    ordinary_block_count = 0
+    for page in manifest:
+        page_blocked = False
+        for block in page.get("blocks", []):
+            if block.get("kind") == "sfx_keep":
+                continue
+            ordinary_block_count += 1
+            gate = block.get("style_gate") or {}
+            if gate.get("status") == "ready" and isinstance(block.get("style_lock"), dict):
+                ready_block_count += 1
+            else:
+                blocked_block_count += 1
+                page_blocked = True
+        if page_blocked:
+            blocked_pages.append(page.get("source_relative") or page.get("file"))
+    failed_pages = sorted({
+        str(problem.get("source_relative") or problem.get("file"))
+        for problem in problems
+        if isinstance(problem, dict)
+    })
+    status = "passed" if not blocked_pages and not failed_pages else "evidence_blocked"
+    analysis_payload = {
+        "status": status,
+        "page_count": len(manifest),
+        "pages": manifest,
+        "problems": problems,
+    }
+    gate_report = {
+        "status": status,
+        "page_count": len(manifest),
+        "ordinary_block_count": ordinary_block_count,
+        "ready_block_count": ready_block_count,
+        "blocked_block_count": blocked_block_count,
+        "blocked_pages": blocked_pages,
+        "failed_pages": failed_pages,
+    }
+    (output_dir / "analysis_manifest.json").write_text(
+        json.dumps(_stringify_paths(analysis_payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "style_gate_report.json").write_text(
+        json.dumps(_stringify_paths(gate_report), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return gate_report
 
 
 def _stringify_paths(value):
@@ -1978,7 +2449,7 @@ def _page_problem(image_path, stage, exc):
 
 def process_analysis_pages(
     images, ocr, source_matcher, font_candidates, mask_dir, overlay_dir,
-    source_lookup=None, precomputed_lines=None,
+    source_lookup=None, precomputed_lines=None, reviewed_pages=None,
 ):
     manifest = []
     block_map = {}
@@ -1988,10 +2459,31 @@ def process_analysis_pages(
         mask_path = mask_dir / f"{image_path.stem}.png"
         overlay_path = overlay_dir / image_path.name
         try:
+            page_source_matcher = (
+                source_matcher.get(image_path.name)
+                if isinstance(source_matcher, dict)
+                else source_matcher
+            )
             image_size, _lines, blocks = analyze_image(
-                ocr, image_path, source_matcher, font_candidates,
+                ocr, image_path, page_source_matcher, font_candidates,
                 precomputed_lines=(precomputed_lines or {}).get(image_path.name),
             )
+            source_relative = (
+                source_lookup[image_path.name].source_relative
+                if source_lookup and image_path.name in source_lookup
+                else image_path.name
+            )
+            for block in blocks:
+                block.block_id = stable_text_block_id(source_relative, block)
+            if reviewed_pages is not None:
+                if image_path.name not in reviewed_pages:
+                    raise ValueError(f"reviewed manifest is missing {source_relative}")
+                apply_reviewed_page(
+                    blocks=blocks,
+                    source_relative=source_relative,
+                    review_rows=reviewed_pages[image_path.name],
+                    font_candidates=font_candidates,
+                )
             make_mask(image_size, blocks, mask_path)
             draw_overlay(image_path, overlay_path, blocks)
             block_map[image_path.name] = blocks
@@ -2044,6 +2536,9 @@ def process_redraw_pages(
         dest = final_dir.joinpath(*relative_name.split("/"))
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
+            apply_reviewed_background_cleanup(
+                image_path, clean_path, block_map[image_path.name]
+            )
             redraw_clean(
                 clean_path, dest, block_map[image_path.name], image_sizes[image_path.name]
             )
@@ -2124,16 +2619,58 @@ def main():
         lama_input_dir = prepare_selected_input(output_dir, selected_pages)
     source_lookup = {page.internal_name: page for page in prepared.pages}
     source_units = split_source_units(read_text_file(args.source))
-    source_matcher = make_source_matcher(source_units) if source_units else None
+    if args.alignment:
+        try:
+            source_matcher = load_confirmed_page_matchers(args.alignment, prepared.pages)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Confirmed page alignment unavailable: {exc}") from exc
+    else:
+        source_matcher = make_source_matcher(source_units) if source_units else None
+    if args.reviewed_manifest:
+        try:
+            reviewed_pages = load_confirmed_review_pages(
+                args.reviewed_manifest, selected_pages
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Confirmed reviewed manifest unavailable: {exc}") from exc
+    else:
+        reviewed_pages = None
 
     manifest, block_map, image_sizes, problems = process_analysis_pages(
         images, ocr, source_matcher, font_candidates, mask_dir, overlay_dir,
-        source_lookup, precomputed_lines,
+        source_lookup, precomputed_lines, reviewed_pages,
     )
+    style_gate_report = write_analysis_artifacts(output_dir, manifest, problems)
+
+    layout_preflight = None
+    if style_gate_report["status"] == "passed" and args.reviewed_manifest:
+        layout_preflight = write_layout_preflight(
+            output_dir, block_map, source_lookup
+        )
 
     if args.skip_lama:
-        print(f"Dry run completed: {output_dir}")
+        print(
+            f"Dry run completed: {output_dir} "
+            f"style_gate={style_gate_report['status']} "
+            f"layout_gate={layout_preflight['status'] if layout_preflight else 'not_run'}"
+        )
         return
+
+    if style_gate_report["status"] != "passed":
+        raise SystemExit(
+            "Text style gate is evidence_blocked; review analysis_manifest.json "
+            "and style_gate_report.json before LaMa or rendering"
+        )
+
+    if not args.reviewed_manifest:
+        raise SystemExit(
+            "Confirmed reviewed manifest is required before LaMa or rendering"
+        )
+    if layout_preflight is None or layout_preflight["status"] != "passed":
+        raise SystemExit(
+            "Reviewed text does not fit at locked style; inspect layout_preflight.json "
+            "before LaMa"
+        )
 
     clean_dir = output_dir / "clean_lama"
     final_dir = output_dir / "final"
