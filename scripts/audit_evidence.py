@@ -1,0 +1,817 @@
+"""Full-resolution, hash-bound dual-audit evidence contracts."""
+
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import re
+import stat
+import threading
+import time
+import unicodedata
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+from pipeline_contracts import canonical_hash, normalize_relative_image_path
+
+
+HIGH_CONFIDENCE = 0.90
+MEDIUM_CONFIDENCE = 0.60
+
+REQUIRED_AUDIT_CHECKS = frozenset(
+    {
+        "identity",
+        "facial_hair",
+        "anatomy",
+        "costume",
+        "prop",
+        "scene",
+        "style",
+        "text",
+        "sfx",
+    }
+)
+
+NON_DEFECT_CODES = frozenset(
+    {
+        "NON_CRITICAL_ACTION_VARIATION",
+        "CAMERA_VARIATION",
+        "EXPRESSION_VARIATION",
+    }
+)
+
+FINDING_REGISTRY = MappingProxyType(
+    {
+        "ANATOMY_ERROR": ("visual", "anatomy", True, "full_page_redraw"),
+        "COSTUME_DRIFT": ("visual", "costume", True, "full_page_redraw"),
+        "FACIAL_HAIR_DRIFT": (
+            "visual",
+            "facial_hair",
+            True,
+            "full_page_redraw",
+        ),
+        "IDENTITY_DRIFT": ("visual", "identity", True, "full_page_redraw"),
+        "PROP_DRIFT": ("visual", "prop", True, "full_page_redraw"),
+        "SCENE_DRIFT": ("visual", "scene", True, "full_page_redraw"),
+        "SFX_ERROR": ("text", "sfx", True, "text_only"),
+        "STYLE_DRIFT": ("visual", "style", True, "full_page_redraw"),
+        "TEXT_ERROR": ("text", "text", True, "text_only"),
+    }
+)
+_KNOWN_DEFECT_CODES = frozenset(FINDING_REGISTRY)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_REVIEWER_ID_RE = re.compile(r"[a-z][a-z0-9._-]{2,63}\Z")
+_PERSPECTIVES = frozenset({"continuity", "source"})
+_CLASSIFICATIONS = frozenset({"unchanged", "defect", "evidence_blocked"})
+_LOG_LOCKS: dict[str, threading.Lock] = {}
+_LOG_LOCKS_GUARD = threading.Lock()
+
+
+def _require_sha256(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ValueError(f"{field} must be a lowercase sha256")
+    return value
+
+
+def _require_positive_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return value
+
+
+def _require_confidence(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("confidence must be a finite number in [0,1]")
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0 or result > 1.0:
+        raise ValueError("confidence must be a finite number in [0,1]")
+    return result
+
+
+def _require_nonempty_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _normalize_unicode_id(value: object, field: str) -> str:
+    text = _require_nonempty_string(value, field)
+    normalized = unicodedata.normalize("NFKC", text).strip().casefold()
+    if not normalized or any(
+        unicodedata.category(char).startswith("C") for char in normalized
+    ):
+        raise ValueError(f"{field} contains an unsafe Unicode character")
+    return normalized
+
+
+def _require_reviewer_id(value: object) -> str:
+    if not isinstance(value, str) or not _REVIEWER_ID_RE.fullmatch(value):
+        raise ValueError(
+            "reviewer_id must be 3-64 lowercase ASCII id characters"
+        )
+    return value
+
+
+def _validate_timestamp(value: object) -> str:
+    text = _require_nonempty_string(value, "reviewed_at")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("reviewed_at must be an ISO-8601 timestamp") from exc
+    if parsed.utcoffset() is None:
+        raise ValueError("reviewed_at must include a timezone")
+    return text
+
+
+def _validate_inspection_rows(
+    value: object, field: str, identity_key: str, required_detail: str
+) -> list[dict[str, Any]]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ValueError(f"{field} must be a non-empty structured list")
+    rows: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for index, row in enumerate(value):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"{field}[{index}] must be structured")
+        identity = _require_nonempty_string(row.get(identity_key), f"{field}.{identity_key}")
+        details = row.get(required_detail)
+        if (
+            isinstance(details, (str, bytes))
+            or not isinstance(details, Sequence)
+            or not details
+            or any(not isinstance(item, str) or not item.strip() for item in details)
+        ):
+            raise ValueError(f"{field}[{index}].{required_detail} must be non-empty")
+        if identity in identities:
+            raise ValueError(f"duplicate {field} identity: {identity}")
+        identities.add(identity)
+        rows.append(copy.deepcopy(dict(row)))
+    return rows
+
+
+def _validate_findings(
+    value: object, *, page: str | None = None
+) -> list[dict[str, Any]]:
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        raise ValueError("findings must be a list")
+    findings: list[dict[str, Any]] = []
+    finding_ids: set[str] = set()
+    semantic_signatures: set[tuple[Any, ...]] = set()
+    for index, finding in enumerate(value):
+        if not isinstance(finding, Mapping):
+            raise ValueError(f"finding {index} must be structured")
+        code = finding.get("code")
+        category = finding.get("category")
+        blocking = finding.get("blocking")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError(f"finding {index} code must be non-empty")
+        if category not in {"visual", "text", "source"}:
+            raise ValueError(f"finding {index} category is invalid")
+        if not isinstance(blocking, bool):
+            raise ValueError(f"finding {index} blocking must be boolean")
+        confidence = _require_confidence(finding.get("confidence"))
+
+        has_location = "location" in finding
+        normalized_location: dict[str, str] | None = None
+        if has_location:
+            location = finding["location"]
+            if not isinstance(location, Mapping) or set(location) != {
+                "panel_id",
+                "region_id",
+            }:
+                raise ValueError(
+                    f"finding {index} location must contain panel_id and region_id"
+                )
+            normalized_location = {
+                "panel_id": _normalize_unicode_id(
+                    location.get("panel_id"), f"finding {index} location.panel_id"
+                ),
+                "region_id": _normalize_unicode_id(
+                    location.get("region_id"), f"finding {index} location.region_id"
+                ),
+            }
+
+        has_entities = "entities" in finding
+        normalized_entities: list[str] = []
+        if has_entities:
+            entities = finding["entities"]
+            if not isinstance(entities, list) or not entities:
+                raise ValueError(
+                    f"finding {index} entities must be a non-empty JSON list"
+                )
+            normalized_entities = sorted(
+                {
+                    _normalize_unicode_id(
+                        entity, f"finding {index} entities entry"
+                    )
+                    for entity in entities
+                }
+            )
+        if not has_location and not has_entities:
+            raise ValueError(
+                f"finding {index} requires location or non-empty entities"
+            )
+
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, Mapping):
+            raise ValueError(f"finding {index} evidence must be structured")
+        try:
+            evidence_path = normalize_relative_image_path(evidence.get("path"))
+        except ValueError as exc:
+            raise ValueError(f"finding {index} evidence path is invalid: {exc}") from exc
+        evidence_sha = _require_sha256(
+            evidence.get("sha256"), f"finding {index} evidence sha256"
+        )
+        repair_scope = finding.get("repair_scope")
+        if repair_scope not in {"none", "text_only", "full_page_redraw"}:
+            raise ValueError(f"finding {index} repair_scope is invalid")
+
+        if code in FINDING_REGISTRY:
+            expected_category, _, expected_blocking, expected_scope = FINDING_REGISTRY[code]
+            if (
+                category != expected_category
+                or blocking is not expected_blocking
+                or repair_scope != expected_scope
+            ):
+                raise ValueError(
+                    f"finding {index} {code} must use category={expected_category}, "
+                    f"blocking={expected_blocking}, repair_scope={expected_scope}"
+                )
+        elif code in NON_DEFECT_CODES:
+            if category != "source" or blocking or repair_scope != "none":
+                raise ValueError(
+                    f"finding {index} {code} must be source/nonblocking/none"
+                )
+
+        normalized = copy.deepcopy(dict(finding))
+        normalized["code"] = code
+        normalized["confidence"] = confidence
+        if has_location:
+            normalized["location"] = normalized_location
+        if has_entities:
+            normalized["entities"] = normalized_entities
+        normalized["evidence"] = {
+            "path": evidence_path,
+            "sha256": evidence_sha,
+        }
+        finding_id = normalized.get("finding_id")
+        if finding_id is None:
+            if page is None:
+                raise ValueError(f"finding {index} finding_id is required")
+            finding_id = canonical_hash(
+                {
+                    "page": page,
+                    "code": code,
+                    "location": normalized.get("location"),
+                    "entities": normalized.get("entities", []),
+                    "evidence_sha256": evidence_sha,
+                }
+            )
+        normalized["finding_id"] = _require_sha256(
+            finding_id, f"finding {index} finding_id"
+        )
+        semantic_signature = (
+            code,
+            canonical_hash(normalized.get("location")),
+            tuple(normalized.get("entities", [])),
+        )
+        if semantic_signature in semantic_signatures:
+            raise ValueError(
+                f"duplicate finding for {code} at the same location/entities"
+            )
+        semantic_signatures.add(semantic_signature)
+        if normalized["finding_id"] in finding_ids:
+            raise ValueError(f"duplicate finding_id: {normalized['finding_id']}")
+        finding_ids.add(normalized["finding_id"])
+        findings.append(normalized)
+    return findings
+
+
+def record_page_audit(audit: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and canonicalize one full-resolution audit without mutating input."""
+    if not isinstance(audit, Mapping):
+        raise ValueError("audit must be a mapping")
+    result = copy.deepcopy(dict(audit))
+    try:
+        result["page"] = normalize_relative_image_path(result.get("page"))
+    except ValueError as exc:
+        raise ValueError(f"invalid page: {exc}") from exc
+    result["source_sha256"] = _require_sha256(
+        result.get("source_sha256"), "source_sha256"
+    )
+    result["width"] = _require_positive_int(result.get("width"), "width")
+    result["height"] = _require_positive_int(result.get("height"), "height")
+    if result.get("perspective") not in _PERSPECTIVES:
+        raise ValueError("perspective must be continuity or source")
+    result["reviewer"] = _require_nonempty_string(result.get("reviewer"), "reviewer")
+    result["reviewer_id"] = _require_reviewer_id(result.get("reviewer_id"))
+    result["reviewed_at"] = _validate_timestamp(result.get("reviewed_at"))
+    result["confidence"] = _require_confidence(result.get("confidence"))
+    result["inspected_panels"] = _validate_inspection_rows(
+        result.get("inspected_panels"), "inspected_panels", "panel", "checks"
+    )
+    result["inspected_entities"] = _validate_inspection_rows(
+        result.get("inspected_entities"), "inspected_entities", "entity", "regions"
+    )
+
+    checks = result.get("checks")
+    if not isinstance(checks, Mapping) or set(checks) != REQUIRED_AUDIT_CHECKS:
+        raise ValueError("checks must contain exactly the required audit checks")
+    if any(not isinstance(value, bool) for value in checks.values()):
+        raise ValueError("checks values must be booleans")
+    result["checks"] = dict(checks)
+    result["findings"] = _validate_findings(
+        result.get("findings"), page=result["page"]
+    )
+
+    classification = result.get("classification")
+    if classification not in _CLASSIFICATIONS:
+        raise ValueError("classification is invalid")
+    evidence = result.get("classification_evidence")
+    if (
+        isinstance(evidence, (str, bytes))
+        or not isinstance(evidence, Sequence)
+        or not evidence
+        or any(not isinstance(item, str) or not item.strip() for item in evidence)
+    ):
+        raise ValueError("classification_evidence must be non-empty")
+    result["classification_evidence"] = [item.strip() for item in evidence]
+    blocking = [finding for finding in result["findings"] if finding["blocking"]]
+    if classification == "unchanged":
+        if not all(result["checks"].values()):
+            raise ValueError("unchanged requires all required checks to pass")
+        if blocking:
+            raise ValueError("unchanged cannot contain blocking findings")
+    elif classification == "defect":
+        known_blocking = [
+            finding
+            for finding in blocking
+            if finding["code"] in FINDING_REGISTRY
+        ]
+        if not known_blocking:
+            raise ValueError(
+                "defect classification requires a blocking known defect finding"
+            )
+        for finding in known_blocking:
+            required_check = FINDING_REGISTRY[finding["code"]][1]
+            if result["checks"][required_check]:
+                raise ValueError(
+                    f"{finding['code']} requires the {required_check} check to fail"
+                )
+
+    artifact = result.get("artifact")
+    if not isinstance(artifact, Mapping):
+        raise ValueError("full-resolution artifact is required")
+    try:
+        artifact_path = normalize_relative_image_path(artifact.get("path"))
+    except ValueError as exc:
+        raise ValueError(f"invalid artifact path: {exc}") from exc
+    if artifact.get("kind") != "full_resolution_page":
+        raise ValueError("full-resolution artifact is required; thumbnails are orientation only")
+    result["artifact"] = {
+        "path": artifact_path,
+        "sha256": _require_sha256(artifact.get("sha256"), "artifact sha256"),
+        "kind": "full_resolution_page",
+    }
+    if "perspective_disagreement" in result and not isinstance(
+        result["perspective_disagreement"], bool
+    ):
+        raise ValueError("perspective_disagreement must be boolean")
+
+    result.pop("evidence_hash", None)
+    result["evidence_hash"] = canonical_hash(result)
+    return result
+
+
+def route_page_decision(
+    findings: Sequence[Mapping[str, Any]],
+    confidence: object,
+    *,
+    perspective_disagreement: bool = False,
+) -> str:
+    """Route audited evidence; uncertainty is never silently treated as clean."""
+    confidence_value = _require_confidence(confidence)
+    if not isinstance(perspective_disagreement, bool):
+        raise ValueError("perspective_disagreement must be boolean")
+    normalized = _validate_findings(findings)
+    if normalized:
+        confidence_value = min(
+            confidence_value,
+            *(finding["confidence"] for finding in normalized),
+        )
+    known_codes = _KNOWN_DEFECT_CODES | NON_DEFECT_CODES
+    if perspective_disagreement or any(row["code"] not in known_codes for row in normalized):
+        return "evidence_blocked"
+    if confidence_value < MEDIUM_CONFIDENCE:
+        return "evidence_blocked"
+    if confidence_value < HIGH_CONFIDENCE:
+        return "second_review_required"
+    blocking = [row for row in normalized if row["blocking"]]
+    if not blocking:
+        return "unchanged"
+    if any(row["repair_scope"] == "full_page_redraw" for row in blocking):
+        return "full_page_redraw"
+    if all(row["repair_scope"] == "text_only" for row in blocking):
+        return "text_only"
+    return "evidence_blocked"
+
+
+def aggregate_page_audits(audits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Enforce the independent continuity/source review gate for one page."""
+    if isinstance(audits, (str, bytes)) or not isinstance(audits, Sequence):
+        raise ValueError("audits must be a sequence")
+    records = [record_page_audit(audit) for audit in audits]
+    perspectives = {record["perspective"] for record in records}
+    if len(records) != 2 or perspectives != _PERSPECTIVES:
+        raise ValueError("both continuity and source perspectives are required")
+    by_perspective = {record["perspective"]: record for record in records}
+    continuity = by_perspective["continuity"]
+    source = by_perspective["source"]
+    if continuity["reviewer_id"] == source["reviewer_id"]:
+        raise ValueError("dual audits require an independent reviewer")
+    if continuity["page"] != source["page"]:
+        raise ValueError("dual audits must bind the same page")
+    if continuity["source_sha256"] != source["source_sha256"]:
+        raise ValueError("dual audits must bind the same source_sha256")
+    if (continuity["width"], continuity["height"]) != (
+        source["width"],
+        source["height"],
+    ):
+        raise ValueError("dual audits must bind the same dimensions")
+
+    merged_findings: dict[tuple[Any, ...], dict[str, Any]] = {}
+    code_shapes: dict[str, set[tuple[str, bool]]] = {}
+    for perspective in ("continuity", "source"):
+        record = by_perspective[perspective]
+        for finding in record["findings"]:
+            signature = (
+                finding["code"],
+                finding["category"],
+                finding["blocking"],
+                canonical_hash(finding.get("location")),
+                tuple(finding.get("entities", [])),
+                finding["repair_scope"],
+            )
+            code_shapes.setdefault(finding["code"], set()).add(
+                (finding["category"], finding["blocking"])
+            )
+            if signature not in merged_findings:
+                merged_findings[signature] = {
+                    **copy.deepcopy(finding),
+                    "perspectives": [],
+                    "reviewers": [],
+                    "reports": [],
+                    "min_confidence": finding["confidence"],
+                }
+            merged_findings[signature]["min_confidence"] = min(
+                merged_findings[signature]["min_confidence"],
+                finding["confidence"],
+            )
+            merged_findings[signature]["perspectives"].append(perspective)
+            merged_findings[signature]["reviewers"].append(record["reviewer"])
+            merged_findings[signature]["reports"].append(
+                {
+                    "perspective": perspective,
+                    "reviewer": record["reviewer"],
+                    "reviewer_id": record["reviewer_id"],
+                    "finding": copy.deepcopy(finding),
+                }
+            )
+    finding_evidence = [
+        merged_findings[key]
+        for key in sorted(
+            merged_findings,
+            key=lambda item: tuple("" if value is None else str(value) for value in item),
+        )
+    ]
+    findings_for_route = [
+        {
+            key: value
+            for key, value in finding.items()
+            if key
+            not in {"perspectives", "reviewers", "reports", "min_confidence"}
+        }
+        for finding in finding_evidence
+    ]
+    for routing_finding, evidence_group in zip(
+        findings_for_route, finding_evidence
+    ):
+        routing_finding["confidence"] = evidence_group["min_confidence"]
+
+    classification_conflict = (
+        continuity["classification"] != source["classification"]
+        and "defect"
+        in {continuity["classification"], source["classification"]}
+    )
+    finding_shape_conflict = any(len(shapes) > 1 for shapes in code_shapes.values())
+    disagreement = (
+        classification_conflict
+        or finding_shape_conflict
+        or any(
+            record.get("perspective_disagreement", False) for record in records
+        )
+    )
+    blocked_evidence = any(
+        record["classification"] == "evidence_blocked" for record in records
+    )
+    decision = (
+        "evidence_blocked"
+        if blocked_evidence
+        else route_page_decision(
+            findings_for_route,
+            min(record["confidence"] for record in records),
+            perspective_disagreement=disagreement,
+        )
+    )
+    result = {
+        "page": continuity["page"],
+        "source_sha256": continuity["source_sha256"],
+        "reviewers": {
+            "continuity": continuity["reviewer"],
+            "source": source["reviewer"],
+        },
+        "reviewer_ids": {
+            "continuity": continuity["reviewer_id"],
+            "source": source["reviewer_id"],
+        },
+        "audit_evidence_hashes": {
+            "continuity": continuity["evidence_hash"],
+            "source": source["evidence_hash"],
+        },
+        "classification_evidence": {
+            "continuity": {
+                "classification": continuity["classification"],
+                "evidence": continuity["classification_evidence"],
+            },
+            "source": {
+                "classification": source["classification"],
+                "evidence": source["classification_evidence"],
+            },
+        },
+        "finding_evidence": finding_evidence,
+        "perspective_disagreement": disagreement,
+        "blocked_evidence": blocked_evidence,
+        "decision": decision,
+    }
+    result["aggregate_hash"] = canonical_hash(result)
+    return result
+
+
+def _thread_lock_for(path: Path) -> threading.Lock:
+    lock_key = str(path.resolve(strict=False)).casefold()
+    with _LOG_LOCKS_GUARD:
+        return _LOG_LOCKS.setdefault(lock_key, threading.Lock())
+
+
+@contextmanager
+def _exclusive_log_lock(log_path: Path, *, timeout_seconds: float = 30.0):
+    """Coordinate readers/writers across Windows processes via a sidecar byte lock.
+
+    The ``.lock`` file is intentionally persistent: deleting a lock file while
+    another process has it open can split future processes across different file
+    identities.  It contains no evidence and is never part of the event chain.
+    """
+    canonical_log_path = log_path.resolve(strict=False)
+    lock_path = Path(str(canonical_log_path) + ".lock")
+    if lock_path.exists() and lock_path.is_symlink():
+        raise ValueError("review log lock path must not be a symlink")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_handle:
+        lock_handle.seek(0, os.SEEK_END)
+        if lock_handle.tell() == 0:
+            lock_handle.write(b"\0")
+            lock_handle.flush()
+            os.fsync(lock_handle.fileno())
+        lock_handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"review log lock timeout after {timeout_seconds:.1f}s"
+                        ) from exc
+                    time.sleep(0.02)
+            try:
+                yield
+            finally:
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:  # pragma: no cover - exercised by non-Windows CI only
+            import fcntl
+
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(
+                        lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"review log lock timeout after {timeout_seconds:.1f}s"
+                        ) from exc
+                    time.sleep(0.02)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _assert_single_link_regular_file(handle, log_path: Path) -> None:
+    file_stat = os.fstat(handle.fileno())
+    path_stat = os.stat(log_path, follow_symlinks=False)
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError("review log target must be a regular file")
+    if (file_stat.st_dev, file_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        raise ValueError("review log target identity changed while locked")
+    if file_stat.st_nlink != 1:
+        raise ValueError(
+            "review log hardlink aliases are forbidden; expected link count 1"
+        )
+
+
+def append_review_event(
+    path: str | Path,
+    event: Mapping[str, Any],
+    *,
+    _fault_after_write: bool = False,
+) -> dict[str, Any]:
+    """Append one canonical event after verifying the complete existing chain.
+
+    Writes occur under a per-path process lock.  If write/flush/fsync fails, only
+    the attempted suffix is truncated back to the verified boundary.
+    """
+    log_path = _validate_log_path(path)
+    normalized_event = _normalize_event(event)
+    if not isinstance(_fault_after_write, bool):
+        raise ValueError("_fault_after_write must be boolean")
+    with _thread_lock_for(log_path), _exclusive_log_lock(log_path):
+        if log_path.exists() and log_path.is_symlink():
+            raise ValueError("review log path must not be a symlink")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a+b") as handle:
+            _assert_single_link_regular_file(handle, log_path)
+            handle.seek(0)
+            existing = handle.read()
+            rows = _parse_review_log(existing)
+            previous = rows[-1]["event_hash"] if rows else None
+            row = {**normalized_event, "previous_event_hash": previous}
+            row["event_hash"] = canonical_hash(row)
+            payload = (
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            original_size = len(existing)
+            try:
+                handle.seek(0, os.SEEK_END)
+                written = handle.write(payload)
+                if written != len(payload):
+                    raise OSError("short append")
+                if _fault_after_write:
+                    raise OSError("injected append failure")
+                handle.flush()
+                os.fsync(handle.fileno())
+                _assert_single_link_regular_file(handle, log_path)
+            except BaseException:
+                handle.seek(original_size)
+                handle.truncate(original_size)
+                handle.flush()
+                os.fsync(handle.fileno())
+                raise
+    return copy.deepcopy(row)
+
+
+def validate_review_log(path: str | Path) -> list[dict[str, Any]]:
+    """Verify every event hash/link and return defensive copies of the rows."""
+    log_path = _validate_log_path(path)
+    with _thread_lock_for(log_path), _exclusive_log_lock(log_path):
+        if not log_path.exists() or not log_path.is_file() or log_path.is_symlink():
+            raise ValueError("review log does not exist as a regular file")
+        try:
+            with log_path.open("rb") as handle:
+                _assert_single_link_regular_file(handle, log_path)
+                payload = handle.read()
+                _assert_single_link_regular_file(handle, log_path)
+        except OSError as exc:
+            raise ValueError(f"review log cannot be read: {exc}") from exc
+    return copy.deepcopy(_parse_review_log(payload))
+
+
+def _validate_log_path(value: object) -> Path:
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError("review log path must be path-like")
+    path = Path(value)
+    if path.suffix.casefold() != ".jsonl":
+        raise ValueError("review log path must use .jsonl")
+    if not path.name or any(part == ".." for part in path.parts):
+        raise ValueError("review log path is unsafe")
+    return path
+
+
+def _normalize_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(event, Mapping):
+        raise ValueError("review event must be a mapping")
+    if "event_hash" in event or "previous_event_hash" in event:
+        raise ValueError("review event contains reserved chain fields")
+    result = copy.deepcopy(dict(event))
+    result["type"] = _require_nonempty_string(result.get("type"), "event type")
+    if "page" in result:
+        try:
+            result["page"] = normalize_relative_image_path(result["page"])
+        except ValueError as exc:
+            raise ValueError(f"invalid event page: {exc}") from exc
+    if "evidence_hash" in result:
+        result["evidence_hash"] = _require_sha256(
+            result["evidence_hash"], "event evidence_hash"
+        )
+    # Hash and return the same JSON-native structure that will actually persist.
+    try:
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        persisted = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"review event is not canonical JSON: {exc}") from exc
+    if not isinstance(persisted, dict):  # defensive; input was already a mapping
+        raise ValueError("review event must persist as a JSON object")
+    return persisted
+
+
+def _parse_review_log(payload: bytes) -> list[dict[str, Any]]:
+    if not payload:
+        return []
+    if not payload.endswith(b"\n"):
+        raise ValueError("review log is truncated (missing final newline)")
+    raw_lines = payload.split(b"\n")[:-1]
+    if not raw_lines or any(not line for line in raw_lines):
+        raise ValueError("review log contains a blank line")
+    rows: list[dict[str, Any]] = []
+    expected_previous: str | None = None
+    for index, raw_line in enumerate(raw_lines, start=1):
+        try:
+            decoded = raw_line.decode("utf-8")
+            row = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"review log line {index} is malformed") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"review log line {index} must be an object")
+        if row.get("previous_event_hash") != expected_previous:
+            raise ValueError(f"review log line {index} has a broken previous hash")
+        claimed = row.get("event_hash")
+        try:
+            _require_sha256(claimed, f"review log line {index} event_hash")
+        except ValueError as exc:
+            raise ValueError(f"review log line {index} has an invalid event hash") from exc
+        hash_payload = dict(row)
+        del hash_payload["event_hash"]
+        if canonical_hash(hash_payload) != claimed:
+            raise ValueError(f"review log line {index} event hash mismatch")
+        # Canonical bytes make equivalent-but-rewritten history detectable.
+        canonical_line = json.dumps(
+            row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        if canonical_line != raw_line:
+            raise ValueError(f"review log line {index} is not canonical")
+        event_payload = dict(row)
+        del event_payload["event_hash"]
+        del event_payload["previous_event_hash"]
+        try:
+            normalized_event = _normalize_event(event_payload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"review log line {index} fails event schema validation: {exc}"
+            ) from exc
+        if normalized_event != event_payload:
+            raise ValueError(
+                f"review log line {index} fails event schema canonicalization"
+            )
+        rows.append(row)
+        expected_previous = claimed
+    return rows
